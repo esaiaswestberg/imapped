@@ -2,65 +2,122 @@
 
 `imap-cache-rs` is a Rust IMAP caching proxy and mirror service.
 
-It exposes an IMAP server to downstream mail clients, mirrors upstream mailboxes into local storage, indexes message content for search, and keeps enough state in PostgreSQL to survive restarts and drive sync/mutation workflows.
+It sits between downstream mail clients and one or more upstream IMAP servers. The server mirrors mailboxes into local storage, serves cached bodies and metadata locally, indexes parsed message content for search, and pushes local mutations back upstream when required.
 
-## Current shape
+## What It Includes
 
-This repository is currently organized as a single Rust crate with these major modules:
+- A Tokio-based IMAP frontend with stateful command handling.
+- An upstream IMAP client with TLS, STARTTLS, and capability detection.
+- A sync engine that mirrors messages, reconciles flags, and replays queued mutations.
+- PostgreSQL-backed canonical metadata and sync state.
+- Cloudflare R2-compatible object storage support, plus filesystem and in-memory backends for development and tests.
+- Tantivy-backed full-text search.
+- Redis-backed coordination and event fanout hooks.
+- Admin CLI commands for user, account, sync, and cache management.
+- A broad test suite covering protocol, sync, storage, search, metrics, and live-upstream behavior.
 
-- `src/protocol/imap.rs` for IMAP command handling
-- `src/upstream/` for the upstream IMAP client
-- `src/sync/` for mailbox synchronization and mutation replay
-- `src/db/` for PostgreSQL repositories and migrations
-- `src/storage/` for object storage backends
-- `src/search/` for Tantivy-backed search
-- `src/admin.rs` for operational CLI commands
+## Repository Layout
 
-## Features implemented
+This repository is a Rust workspace. The main pieces are:
 
-- IMAP login, select, fetch, store, copy, move, expunge, append, idle, and related protocol plumbing
-- PostgreSQL-backed metadata storage
-- R2/S3-compatible object storage abstraction with filesystem and in-memory test backends
-- Tantivy full-text indexing
-- Redis-backed coordination and event fanout hooks
-- Admin CLI for common operational tasks
-- Integration and protocol tests
+- `crates/core/` for shared domain types, errors, and security helpers.
+- `crates/config/` for configuration loading.
+- `crates/auth/` for authentication and account bootstrap logic.
+- `crates/db/` for SQLx repositories and migrations.
+- `crates/imap-server/` for the IMAP frontend and HTTP metrics/admin endpoints.
+- `crates/upstream/` for the upstream IMAP client.
+- `crates/sync/` for mailbox synchronization and mutation replay.
+- `crates/storage/` for object storage abstractions and backends.
+- `crates/search/` for Tantivy indexing and search.
+- `crates/notifications/` for mailbox events and Redis relay hooks.
+- `crates/test-support/` for shared live-test helpers.
+- `src/` for the top-level binary and admin wiring.
 
-## Quick start
+## Status
 
-1. Start local dependencies.
-2. Export configuration through environment variables or a config file.
-3. Run the server or the admin CLI.
+The current implementation covers the core production path:
 
-### Local development
+- IMAP login, capability negotiation, select/examine, fetch, store, copy, move, append, expunge, idle, namespace, enable, condstore, esearch, sort, and thread-related flows.
+- Mailbox sync against upstream servers.
+- Local storage of message blobs and parsed MIME data.
+- Search and admin operations.
+
+The codebase is already split into focused crates, so the architecture matches the eventual production deployment boundaries.
+
+## Local Development
+
+The repository includes a Docker-based local stack with PostgreSQL, Redis, MinIO-compatible storage, and an optional Dovecot upstream for integration tests.
 
 ```bash
 make up
+```
+
+Run tests:
+
+```bash
 make test
 ```
 
-To bring up the optional Dovecot upstream service for integration testing, use:
+Bring up the optional test upstream:
 
 ```bash
 make up-test
 ```
 
-### Admin commands
+Shut the stack down:
 
 ```bash
-cargo run --bin imap-cache-rs -- --help
-cargo run --bin imap-cache-rs -- list-accounts --user-email user@example.test
+make down
 ```
+
+## Production Docker Deployment
+
+See [Production Docker Deployment](./deployment.md) for the recommended production setup, including:
+
+- Building or pulling the service image.
+- Running the app in Docker with persistent volumes via [`docker-compose.prod.yml`](./docker-compose.prod.yml).
+- Connecting to PostgreSQL, Redis, and Cloudflare R2.
+- Mounting TLS certificates for IMAP STARTTLS and implicit TLS.
+- Running migrations before opening the service to clients.
+- Bootstrapping users and mail accounts with the admin CLI.
 
 ## Configuration
 
-See [`config.example.toml`](./config.example.toml) for a baseline config file and [`docker-compose.yml`](./docker-compose.yml) for a local development stack.
+Configuration can be supplied either through environment variables or a TOML file.
+
+- Use `--config /path/to/config.toml` to point the binary at a config file.
+- Alternatively set `APP_CONFIG_PATH=/path/to/config.toml`.
+- See [`config.example.toml`](./config.example.toml) for a config-file example.
+- See [`.env.example`](./.env.example) for an environment-variable example.
+
+The important runtime settings include:
+
+- listener bind addresses for IMAP, HTTP, and metrics
+- `DATABASE_URL` for PostgreSQL
+- `REDIS_URL` for Redis fanout and coordination
+- `R2_*` values for Cloudflare R2
+- `IMAP_TLS_CERT_PATH` and `IMAP_TLS_KEY_PATH` for TLS
+- `ENCRYPTION_MASTER_KEY` for secret handling
+
+## Administration
+
+The binary exposes admin subcommands for common operational tasks.
+
+Examples:
+
+```bash
+cargo run --bin imap-cache-rs -- --help
+cargo run --bin imap-cache-rs -- run-migrations
+cargo run --bin imap-cache-rs -- list-accounts --user-email user@example.test
+```
 
 ## Testing
 
-The test suite includes unit, integration, protocol, sync, storage, search, and live-upstream coverage.
-Live upstream tests read credentials from `.testing-credentials` in the repo root and use the `IMAP (SSL/TLS)` endpoint plus the listed username/password.
-If you prefer a containerized upstream instead, start the compose `test` profile and point the relevant tests at the exposed Dovecot ports.
+The test suite includes unit, integration, protocol, sync, storage, search, metrics, and live-upstream coverage.
+
+Live upstream tests read credentials from `.testing-credentials` in the repository root and use the listed IMAP SSL/TLS endpoint plus username/password. Those tests are serialized with a shared file lock so they can run safely across multiple cargo test binaries.
+
+Run the full suite with:
 
 ```bash
 cargo test

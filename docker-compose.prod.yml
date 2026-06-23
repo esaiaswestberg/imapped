@@ -1,0 +1,29 @@
+services:
+  imap-cache:
+    image: ghcr.io/your-org/imap-cache-rs:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    entrypoint:
+      - /app/imap-cache-rs
+    env_file:
+      - .env.production
+    environment:
+      APP_ENV: production
+      OBJECT_STORE_PATH: /app/data/blob
+      SEARCH_INDEX_PATH: /app/data/search
+      IMAP_TLS_CERT_PATH: /certs/imap.crt
+      IMAP_TLS_KEY_PATH: /certs/imap.key
+    volumes:
+      - imap-cache-data:/app/data
+      - ./certs:/certs:ro
+    ports:
+      - "143:1143"
+      - "993:1993"
+      - "8080:8080"
+      # - "9090:9090" if METRICS_BIND is enabled
+    command: ["run"]
+
+volumes:
+  imap-cache-data:

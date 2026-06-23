@@ -1,5 +1,6 @@
 target
 .git
 .env
+.testing-credentials
 .DS_Store
 *.swp
