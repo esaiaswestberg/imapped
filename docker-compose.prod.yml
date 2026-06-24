@@ -25,7 +25,6 @@ services:
       - "993:1993"
       - "8080:8080"
       # - "9090:9090" if METRICS_BIND is enabled
-    command: ["run"]
 
   postgres:
     image: postgres:16
