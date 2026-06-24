@@ -44,6 +44,7 @@ struct FileConfig {
     bootstrap_imap_username: Option<String>,
     bootstrap_imap_password_hash: Option<String>,
     bootstrap_imap_password: Option<String>,
+    periodic_sync_interval_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +80,7 @@ pub struct Config {
     pub bootstrap_imap_username: Option<String>,
     pub bootstrap_imap_password_hash: Option<String>,
     pub bootstrap_imap_password: Option<String>,
+    pub periodic_sync_interval_seconds: u64,
 }
 
 impl Default for Config {
@@ -115,6 +117,7 @@ impl Default for Config {
             bootstrap_imap_username: None,
             bootstrap_imap_password_hash: None,
             bootstrap_imap_password: None,
+            periodic_sync_interval_seconds: 3600,
         }
     }
 }
@@ -249,6 +252,9 @@ impl Config {
         if let Some(value) = file.bootstrap_imap_password {
             self.bootstrap_imap_password = Some(value);
         }
+        if let Some(value) = file.periodic_sync_interval_seconds {
+            self.periodic_sync_interval_seconds = value;
+        }
         Ok(())
     }
 
@@ -325,6 +331,10 @@ impl Config {
         self.bootstrap_imap_password = env::var("BOOTSTRAP_IMAP_PASSWORD")
             .ok()
             .or_else(|| self.bootstrap_imap_password.clone());
+        self.periodic_sync_interval_seconds = env_num(
+            "PERIODIC_SYNC_INTERVAL_SECONDS",
+            self.periodic_sync_interval_seconds,
+        )?;
         Ok(())
     }
 

@@ -33,6 +33,15 @@ pub async fn run(config: config::Config) -> Result<()> {
                 config.upstream_connection_limit_per_account,
             );
         }
+        if let Some(sync_engine) = services.sync_engine.as_ref() {
+            spawn_periodic_sync_worker(
+                Arc::clone(repo),
+                Arc::clone(sync_engine),
+                Arc::clone(&services.metrics),
+                config.upstream_connection_limit_per_account,
+                config.periodic_sync_interval_seconds,
+            );
+        }
     }
     let mut tasks = JoinSet::new();
     let starttls_acceptor = match protocol::imap::tls_acceptor(&config) {
@@ -169,6 +178,64 @@ async fn flush_pending_mutations_once(
         let _ = mutation_engine
             .flush_pending_mutations(account.id, &mut client)
             .await?;
+        client.logout().await?;
+    }
+    Ok(())
+}
+
+fn spawn_periodic_sync_worker(
+    repository: Arc<db::repository::PostgresRepository>,
+    sync_engine: Arc<sync::SyncEngine>,
+    metrics: Arc<metrics::AppMetrics>,
+    upstream_connection_limit_per_account: usize,
+    interval_seconds: u64,
+) {
+    if interval_seconds == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds));
+        loop {
+            interval.tick().await;
+            if let Err(err) = sync_all_accounts_once(
+                Arc::clone(&repository),
+                Arc::clone(&sync_engine),
+                Arc::clone(&metrics),
+                upstream_connection_limit_per_account,
+            )
+            .await
+            {
+                warn!(error = %err, "periodic sync worker failed");
+            }
+        }
+    });
+}
+
+async fn sync_all_accounts_once(
+    repository: Arc<db::repository::PostgresRepository>,
+    sync_engine: Arc<sync::SyncEngine>,
+    metrics: Arc<metrics::AppMetrics>,
+    upstream_connection_limit_per_account: usize,
+) -> Result<()> {
+    let accounts = repository.list_enabled_accounts().await?;
+    for account in accounts {
+        let Some(upstream_config) = repository.upstream_account_config_by_id(account.id).await?
+        else {
+            continue;
+        };
+        let mut client = crate::upstream::UpstreamClient::connect(&upstream_config)
+            .await?
+            .with_metrics(Arc::clone(&metrics))
+            .with_account_connection_limit(account.id, upstream_connection_limit_per_account)
+            .await?;
+        client
+            .authenticate_with_method(
+                upstream_config.auth_method,
+                &upstream_config.username,
+                &upstream_config.secret,
+            )
+            .await?;
+        let _ = sync_engine.sync_account(account.id, &mut client).await?;
         client.logout().await?;
     }
     Ok(())

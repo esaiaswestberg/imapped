@@ -1030,7 +1030,8 @@ impl SyncEngine {
 
         let mut messages_synced = 0usize;
         let mut newest_uid = None;
-        let upstream_uids = upstream.uid_search_all().await?;
+        let mut upstream_uids = upstream.uid_search_all().await?;
+        upstream_uids.sort_by(|a, b| b.cmp(a));
         let upstream_uid_set = upstream_uids
             .iter()
             .filter_map(|uid| i64::try_from(*uid).ok())
@@ -1064,6 +1065,9 @@ impl SyncEngine {
             if uid_i64 <= last_uid {
                 continue;
             }
+            if local_by_upstream_uid.contains_key(&uid_i64) {
+                continue;
+            }
             let raw = upstream.uid_fetch_rfc822(uid).await?;
             self.ingestor
                 .ingest_raw_message(
@@ -1078,7 +1082,7 @@ impl SyncEngine {
                 )
                 .await?;
             messages_synced += 1;
-            newest_uid = Some(uid_i64);
+            newest_uid = Some(std::cmp::max(newest_uid.unwrap_or(0), uid_i64));
         }
 
         let state_json = serde_json::json!({

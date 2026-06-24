@@ -28,3 +28,4 @@ idle_timeout_seconds = 1740
 upstream_connection_limit_per_account = 2
 login_rate_limit_failures = 5
 login_rate_limit_lockout_seconds = 60
+periodic_sync_interval_seconds = 3600

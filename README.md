@@ -154,21 +154,54 @@ The important runtime settings include:
 
 ### Environment variables
 
-The production compose file and `.env.example` use these key groups:
+The production compose file and `.env.example` configure the application via the following key groups. Unless otherwise specified, all settings are Optional and will fall back to their defaults.
 
-- `IMAP_PLAINTEXT_BIND` and `IMAP_TLS_BIND` for the downstream mail client listeners
-- `HTTP_BIND` and `METRICS_BIND` for operational endpoints
-- `DATABASE_URL` for PostgreSQL
-- `REDIS_URL` for Redis
-- `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_REGION` for blob storage
-- `OBJECT_STORE_PATH` and `SEARCH_INDEX_PATH` for local runtime data
-- `MAX_LITERAL_SIZE_BYTES`, `MAX_MESSAGE_SIZE_BYTES`, `DEFAULT_ACCOUNT_QUOTA_BYTES`, `SYNC_CONCURRENCY`, `UPSTREAM_CONNECTION_LIMIT_PER_ACCOUNT`, `LOGIN_RATE_LIMIT_FAILURES`, and `LOGIN_RATE_LIMIT_LOCKOUT_SECONDS` for safety tuning
+**Core Application Settings:**
+- `APP_ENV`: (Default: `development`, Type: String) Sets the application environment. Controls features like the format of logging output (e.g. `production` enables JSON logs).
+- `APP_BASE_URL`: (Default: `http://localhost:8080`, Type: URL) The base URL for the application. Primarily used to construct self-referential links.
+- `LOG_LEVEL`: (Default: `debug`, Type: String) Sets the verbosity of application logs. Valid values include `trace`, `debug`, `info`, `warn`, and `error`.
+- `ENCRYPTION_MASTER_KEY`: (Default: `change-me-32-bytes-minimum`, Type: String) The master encryption key used to protect sensitive data at rest. Must remain stable across restarts to avoid data loss. **Required for production deployments.**
+
+**Network Listeners:**
+- `IMAP_PLAINTEXT_BIND`: (Default: `0.0.0.0:1143`, Type: Socket Address) The interface and port to bind for the plaintext IMAP listener.
+- `IMAP_TLS_BIND`: (Default: `0.0.0.0:1993`, Type: Socket Address) The interface and port to bind for the TLS/SSL IMAP listener.
+- `IMAP_TLS_CERT_PATH`: (Default: `/certs/imap.crt`, Type: Path) The path to the PEM-encoded TLS certificate used for IMAP connections. Required if TLS is enabled.
+- `IMAP_TLS_KEY_PATH`: (Default: `/certs/imap.key`, Type: Path) The path to the private key for the IMAP TLS certificate. Required if TLS is enabled.
+- `HTTP_BIND`: (Default: `0.0.0.0:8080`, Type: Socket Address) The interface and port to bind the administrative and health HTTP server.
+- `METRICS_BIND`: (Default: None, Type: Socket Address) The interface and port to bind a dedicated Prometheus metrics endpoint.
+
+**Datastore Configurations:**
+- `DATABASE_URL`: (Default: None, Type: Connection String) The connection string for the PostgreSQL database where metadata is stored. **Required.**
+- `REDIS_URL`: (Default: None, Type: Connection String) The connection string for Redis, used for pub/sub notifications and synchronization.
+- `OBJECT_STORE_PATH`: (Default: `./data/blob`, Type: Path) The path to a local directory for filesystem-based object storage, typically used for local development.
+- `SEARCH_INDEX_PATH`: (Default: `./data/search`, Type: Path) The path to a local directory where the Tantivy full-text search index will be stored.
+
+**S3-Compatible Object Storage:**
+- `R2_ENDPOINT`: (Default: None, Type: URL) The URL endpoint for the S3-compatible object store (e.g., Cloudflare R2, MinIO).
+- `R2_BUCKET`: (Default: None, Type: String) The bucket name within the S3-compatible object store.
+- `R2_ACCESS_KEY_ID`: (Default: None, Type: String) The access key ID for authenticating with the object store.
+- `R2_SECRET_ACCESS_KEY`: (Default: None, Type: String) The secret access key for authenticating with the object store.
+- `R2_REGION`: (Default: `auto`, Type: String) The region to use for the S3-compatible object store connection.
+
+**Safety Limits and Tuning:**
+- `MAX_LITERAL_SIZE_BYTES`: (Default: `52428800` (50 MB), Type: Integer) The maximum size of an IMAP literal command payload.
+- `MAX_MESSAGE_SIZE_BYTES`: (Default: `104857600` (100 MB), Type: Integer) The maximum size of an individual email message.
+- `DEFAULT_ACCOUNT_QUOTA_BYTES`: (Default: `10737418240` (10 GB), Type: Integer) The default storage quota allocated to new IMAP accounts.
+- `SYNC_CONCURRENCY`: (Default: `4`, Type: Integer) The maximum number of concurrent synchronization tasks to run.
+- `UPSTREAM_CONNECTION_LIMIT_PER_ACCOUNT`: (Default: `2`, Type: Integer) The maximum number of simultaneous IMAP connections established per upstream account.
+- `LOGIN_RATE_LIMIT_FAILURES`: (Default: `5`, Type: Integer) The number of failed login attempts allowed before locking out an IP.
+- `LOGIN_RATE_LIMIT_LOCKOUT_SECONDS`: (Default: `60`, Type: Integer) The duration in seconds that an IP is locked out after exceeding the login failure limit.
+- `PERIODIC_SYNC_INTERVAL_SECONDS`: (Default: `3600`, Type: Integer) The interval in seconds at which the background sync worker will check and synchronize all configured accounts.
 
 ### Bootstrap authentication
 
-The service supports a bootstrap IMAP login path when `BOOTSTRAP_IMAP_USERNAME` is set together with either `BOOTSTRAP_IMAP_PASSWORD` or `BOOTSTRAP_IMAP_PASSWORD_HASH`.
+The service supports a bootstrap IMAP login path. This is useful for local development, quick smoke tests, or a controlled bootstrap user. For normal production use, you should create application users in the database with the admin CLI instead.
 
-Use this for local development, quick smoke tests, or a controlled bootstrap user. For normal production use, create application users in the database with the admin CLI instead.
+To enable the bootstrap account, configure the username and exactly one password option:
+
+- `BOOTSTRAP_IMAP_USERNAME`: (Default: None, Type: String) The username for the bootstrap administrative user. Optional.
+- `BOOTSTRAP_IMAP_PASSWORD`: (Default: None, Type: String) The plain-text password for the bootstrap user. Optional.
+- `BOOTSTRAP_IMAP_PASSWORD_HASH`: (Default: None, Type: String) A pre-hashed password for the bootstrap user, encoded using the **Argon2** hashing algorithm. Optional.
 
 ### Upstream IMAP accounts
 
