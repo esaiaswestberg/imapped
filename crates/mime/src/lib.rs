@@ -68,11 +68,26 @@ pub fn parse_message(raw: &[u8]) -> Result<ParsedMessage> {
     let mut preview = None;
     let bodystructure_json = build_part_tree(&parsed, "1", &mut mime_parts, &mut preview)?;
 
+    let mut from_json = from_json;
+    let mut to_json = to_json;
+    let mut cc_json = cc_json;
+    let mut bcc_json = bcc_json;
+    let mut reply_to_json = reply_to_json;
+    let mut envelope_json = envelope_json;
+    let mut bodystructure_json = bodystructure_json;
+    strip_nul_bytes_json(&mut from_json);
+    strip_nul_bytes_json(&mut to_json);
+    strip_nul_bytes_json(&mut cc_json);
+    strip_nul_bytes_json(&mut bcc_json);
+    strip_nul_bytes_json(&mut reply_to_json);
+    strip_nul_bytes_json(&mut envelope_json);
+    strip_nul_bytes_json(&mut bodystructure_json);
+
     Ok(ParsedMessage {
         raw_sha256,
         size_octets: raw.len(),
-        message_id_header,
-        subject,
+        message_id_header: message_id_header.map(|s| strip_nul_bytes(&s)),
+        subject: subject.map(|s| strip_nul_bytes(&s)),
         from_json,
         to_json,
         cc_json,
@@ -80,9 +95,40 @@ pub fn parse_message(raw: &[u8]) -> Result<ParsedMessage> {
         reply_to_json,
         envelope_json,
         bodystructure_json,
-        text_preview: preview,
+        text_preview: preview.map(|s| strip_nul_bytes(&s)),
         mime_parts,
     })
+}
+
+// Postgres TEXT/JSONB columns reject the NUL byte (0x00), which malformed or
+// adversarial messages can smuggle into headers or decoded body text.
+fn strip_nul_bytes(value: &str) -> String {
+    if value.contains('\0') {
+        value.replace('\0', "")
+    } else {
+        value.to_string()
+    }
+}
+
+fn strip_nul_bytes_json(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            if s.contains('\0') {
+                *s = s.replace('\0', "");
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_nul_bytes_json(item);
+            }
+        }
+        Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                strip_nul_bytes_json(v);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn extract_part_bytes(raw: &[u8], part_path: &str) -> Result<Option<Vec<u8>>> {
