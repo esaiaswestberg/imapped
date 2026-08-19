@@ -28,11 +28,19 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -ldflags="-s -w -X github.com/esaiaswestberg/imapped/internal/cli.Version=${VERSION} -X github.com/esaiaswestberg/imapped/internal/cli.Commit=${COMMIT}" \
       -o /out/imapped ./cmd/imapped
 
+# An empty /data owned by the runtime user. Docker initialises an empty named
+# volume from whatever the image has at the mount point, ownership included, so
+# creating it here is what lets a non-root container write to its own volume.
+# Without it the container starts, fails to create its blob directory, and
+# restart-loops with a permission error that looks like a bug in the app.
+RUN mkdir -p /out/data
+
 # distroless/static provides CA certificates and an /etc/passwd entry for the
 # nonroot user, and nothing else — no shell, no package manager.
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=build /out/imapped /imapped
+COPY --from=build --chown=nonroot:nonroot /out/data /data
 
 # 1143 IMAP, 1993 IMAPS, 8080 web UI, 9090 metrics.
 EXPOSE 1143 1993 8080 9090

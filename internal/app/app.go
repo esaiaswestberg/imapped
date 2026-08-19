@@ -6,7 +6,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 
 	"github.com/esaiaswestberg/imapped/internal/blob"
@@ -92,5 +94,18 @@ func openBlobStore(cfg config.Config, log *slog.Logger) (blob.Store, error) {
 			"clear the s3_* settings to use local disk at storage.path")
 	}
 	log.Info("using local blob storage", "path", cfg.Storage.Path)
-	return blob.NewFSStore(cfg.Storage.Path)
+
+	store, err := blob.NewFSStore(cfg.Storage.Path)
+	if err != nil && errors.Is(err, fs.ErrPermission) {
+		// Overwhelmingly this means a container volume mounted at this path is
+		// owned by root while the process runs as someone else. The bare
+		// "permission denied" sends people looking for a bug in the software.
+		return nil, fmt.Errorf("%w\n\n"+
+			"The blob directory could not be created. If this is running in a container, "+
+			"the volume mounted at %s is probably owned by root while the process runs as "+
+			"a non-root user. Fix the ownership with:\n"+
+			"  docker run --rm -v <volume-name>:/data alpine chown -R 65532:65532 /data",
+			err, cfg.Storage.Path)
+	}
+	return store, err
 }
