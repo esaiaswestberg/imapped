@@ -8,9 +8,12 @@
 package web
 
 import (
+	"context"
 	"embed"
 	"log/slog"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/esaiaswestberg/imapped/internal/blob"
 	"github.com/esaiaswestberg/imapped/internal/config"
@@ -39,6 +42,12 @@ type Server struct {
 
 	// provenance backs the settings page.
 	provenance []config.Field
+
+	// background is the parent of every task started from the interface. It is
+	// cancelled at shutdown, and tracked, so a sync triggered from a button
+	// still records its outcome instead of vanishing with the process.
+	background context.Context
+	tasks      sync.WaitGroup
 }
 
 // Options configures a Server.
@@ -51,6 +60,10 @@ type Options struct {
 	Sealer     *crypto.Sealer
 	Logger     *slog.Logger
 	Provenance []config.Field
+
+	// Background parents work started from the interface. Cancelled at
+	// shutdown; defaults to context.Background if unset.
+	Background context.Context
 }
 
 // New builds a Server.
@@ -59,7 +72,13 @@ func New(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	background := opts.Background
+	if background == nil {
+		background = context.Background()
+	}
+
 	return &Server{
+		background: background,
 		cfg:        opts.Config,
 		store:      opts.Store,
 		blobs:      opts.Blobs,
@@ -103,4 +122,26 @@ func (s *Server) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /sync/events", s.requireUser(s.handleSyncEvents))
 	mux.HandleFunc("GET /runs", s.requireUser(s.handleRuns))
 	mux.HandleFunc("GET /settings", s.requireUser(s.handleSettings))
+}
+
+// WaitForTasks blocks until work started from the interface has finished, or
+// until the grace period expires.
+//
+// Shutdown waits for these deliberately. A sync records its outcome in a
+// deferred write, so a process that exits without giving it a moment leaves the
+// run marked as still running — which then has to be swept up as an orphan on
+// the next start, and looks like a crash that never happened.
+func (s *Server) WaitForTasks(grace time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		s.tasks.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(grace):
+		return false
+	}
 }

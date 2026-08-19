@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/esaiaswestberg/imapped/internal/blob"
 	"github.com/esaiaswestberg/imapped/internal/config"
@@ -303,4 +304,45 @@ func itoa(n int64) string {
 		n /= 10
 	}
 	return string(digits)
+}
+
+// WaitForTasks must return promptly when there is nothing to wait for, and
+// report honestly when the grace period expires.
+func TestWaitForTasks(t *testing.T) {
+	ui := newBareServer(t)
+
+	start := time.Now()
+	if !ui.WaitForTasks(5 * time.Second) {
+		t.Error("waiting with no outstanding work should succeed immediately")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("waiting with no work took %s", elapsed)
+	}
+}
+
+// newBareServer builds a web server with the minimum needed to exercise
+// lifecycle behaviour.
+func newBareServer(t *testing.T) *web.Server {
+	t.Helper()
+
+	pool := pgtest.New(t)
+	st := store.New(pool)
+	sealer, err := crypto.NewSealer(testKey)
+	if err != nil {
+		t.Fatalf("creating sealer: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.EncryptionMasterKey = testKey
+
+	ui, err := web.New(web.Options{
+		Config: cfg, Store: st, Blobs: blob.NewMemStore(),
+		Search: search.NewPostgres(pool, "english"),
+		Engine: syncer.New(cfg, st, blob.NewMemStore(), sealer, logging.Discard()),
+		Sealer: sealer, Logger: logging.Discard(),
+	})
+	if err != nil {
+		t.Fatalf("building the web server: %v", err)
+	}
+	return ui
 }

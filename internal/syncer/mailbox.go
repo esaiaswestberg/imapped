@@ -107,6 +107,16 @@ func (e *Engine) syncMailbox(
 	go func() {
 		defer wg.Done()
 		bodies, bytes, bodyErr = e.bodyPass(ctx, account, mailbox, p, metadataDone)
+
+		// Reported the moment it happens. The error is not returned to the
+		// caller until the metadata pass also finishes, which on a large
+		// mailbox is hours away — so a body pass that died in the first minute
+		// would otherwise leave the download counter frozen with nothing
+		// anywhere to say why.
+		if bodyErr != nil && !errors.Is(bodyErr, context.Canceled) {
+			e.log.Error("downloading message bodies stopped early",
+				"mailbox", box.Name, "downloaded", bodies, "error", bodyErr)
+		}
 	}()
 
 	newMessages, metaErr := e.metadataPass(ctx, client, account, mailbox, selected, p)
@@ -483,12 +493,17 @@ func (e *Engine) bodyPass(
 			workerClient, err := e.connect.Connect(groupCtx, creds)
 			if err != nil {
 				// A server refusing further connections is a reason to run with
-				// fewer workers, not to fail the sync.
+				// fewer workers, not to fail the sync. Warn rather than inform:
+				// losing a worker silently is how a download queue ends up
+				// making no progress with nothing to explain it.
 				if upstream.IsTooManyConnections(err) {
-					e.log.Info("upstream refused an additional connection, continuing with fewer workers",
-						"account_id", account.ID, "worker", worker)
+					e.log.Warn("upstream refused another connection; this worker will not run. "+
+						"Lower sync.connections_per_account if downloads stall",
+						"account_id", account.ID, "worker", worker, "error", err)
 					return nil
 				}
+				e.log.Warn("a body-fetch worker could not connect",
+					"account_id", account.ID, "worker", worker, "error", err)
 				return err
 			}
 			defer workerClient.Close()

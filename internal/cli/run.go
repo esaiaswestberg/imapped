@@ -80,15 +80,21 @@ func run(ctx context.Context, res *config.Result) error {
 
 	group, ctx := errgroup.WithContext(ctx)
 
+	var ui *web.Server
+
 	if cfg.HTTP.Bind != "" {
 		mux := http.NewServeMux()
 		httpsrv.Mount(mux, cfg, metrics, health)
 
 		if cfg.Web.Enabled {
-			ui, err := web.New(web.Options{
+			ui, err = web.New(web.Options{
 				Config: cfg, Store: application.Store, Blobs: application.Blobs,
 				Search: application.Search, Engine: application.Engine,
 				Sealer: application.Sealer, Logger: log, Provenance: res.Fields,
+				// Work started from the interface is cancelled at shutdown and
+				// waited for below, so a sync in flight records its outcome
+				// rather than leaving its run row marked as still running.
+				Background: ctx,
 			})
 			if err != nil {
 				return err
@@ -141,8 +147,19 @@ func run(ctx context.Context, res *config.Result) error {
 		log.Info("background syncing is disabled; syncs must be started from the interface")
 	}
 
-	if err := group.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-		return err
+	waitErr := group.Wait()
+
+	// Give work started from the interface a moment to finish recording what it
+	// did. Without this the process exits first and the run looks abandoned.
+	if ui != nil {
+		if !ui.WaitForTasks(cfg.HTTP.ShutdownTimeout.Std()) {
+			log.Warn("background work did not finish within the shutdown grace period; " +
+				"a sync run may be left marked as running")
+		}
+	}
+
+	if waitErr != nil && !errors.Is(waitErr, context.Canceled) {
+		return waitErr
 	}
 	log.Info("shutdown complete")
 	return nil

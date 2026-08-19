@@ -261,16 +261,25 @@ func (s *Server) handleSyncAccount(w http.ResponseWriter, r *http.Request) {
 // startSync launches a sync in the background.
 //
 // The request must not wait for it: a first sync of a large mailbox takes
-// minutes, and holding an HTTP request open for that would time out somewhere
-// between the browser and any reverse proxy in between. The sync therefore
-// deliberately does not inherit the request context, which is cancelled as
-// soon as the response is written.
+// hours, and holding an HTTP request open for that would time out somewhere
+// between the browser and any reverse proxy in between. So the sync does not
+// inherit the request context, which is cancelled as soon as the response is
+// written.
+//
+// It does inherit the server's background context, which shutdown cancels, and
+// it is tracked so shutdown can wait for it. Detaching from both — which this
+// did — meant a redeploy killed the sync mid-flight with its run row still
+// marked running, to be swept up as an orphan on the next start.
 //
 //nolint:contextcheck // background work must outlive the request that started it
 func (s *Server) startSync(accountID int64, trigger string) {
+	s.tasks.Add(1)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Sync.MaxRunDuration.Std())
+		defer s.tasks.Done()
+
+		ctx, cancel := context.WithTimeout(s.background, s.cfg.Sync.MaxRunDuration.Std())
 		defer cancel()
+
 		if _, err := s.engine.SyncAccount(ctx, accountID, trigger); err != nil {
 			s.log.Error("sync failed", "account_id", accountID, "error", err)
 		}

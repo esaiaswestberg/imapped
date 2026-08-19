@@ -5,6 +5,10 @@
 # default must be set in a .env file alongside this one.
 services:
   app:
+    # Shutdown cancels any sync in flight and waits for it to record its
+    # outcome. Docker's default 10s is not always enough, and killing the
+    # process early leaves a run marked as still running.
+    stop_grace_period: 45s
     image: ghcr.io/esaiaswestberg/imapped:${IMAPPED_VERSION:-latest}
     restart: unless-stopped
     depends_on:
