@@ -27,11 +27,12 @@ type harness struct {
 	blobs     *blob.MemStore
 	server    *fakeimap.Server
 	accountID int64
+	cfg       config.Config
 }
 
 // newHarness wires a complete sync stack against a throwaway database and a
 // real (fake) IMAP server.
-func newHarness(t *testing.T, opts fakeimap.Options) *harness {
+func newHarness(t *testing.T, opts fakeimap.Options, tweaks ...func(*config.Config)) *harness {
 	t.Helper()
 
 	srv := fakeimap.Start(t, opts)
@@ -57,6 +58,10 @@ func newHarness(t *testing.T, opts fakeimap.Options) *harness {
 	// running out the suite's own timeout.
 	cfg.Upstream.FetchMetadataTimeout = config.Duration(60 * time.Second)
 	cfg.Upstream.FetchBodyTimeout = config.Duration(60 * time.Second)
+
+	for _, tweak := range tweaks {
+		tweak(&cfg)
+	}
 
 	ctx := context.Background()
 
@@ -87,6 +92,7 @@ func newHarness(t *testing.T, opts fakeimap.Options) *harness {
 	}
 
 	return &harness{
+		cfg:       cfg,
 		engine:    syncer.New(cfg, st, blobs, sealer, logging.Discard()),
 		store:     st,
 		blobs:     blobs,
@@ -623,5 +629,75 @@ func TestMetadataFetchDoesNotRequestBodyStructure(t *testing.T) {
 		if strings.Contains(strings.ToUpper(command), "BODYSTRUCTURE") {
 			t.Errorf("a command requested BODYSTRUCTURE: %s", command)
 		}
+	}
+}
+
+// Bodies must download while metadata is still being enumerated.
+//
+// Running the passes in sequence meant nothing became readable until the last
+// message had been enumerated. On a mailbox of a hundred thousand messages that
+// is hours of an empty interface while the sync is in fact working, so the
+// property worth protecting is that the two overlap.
+func TestBodiesDownloadWhileMetadataIsStillRunning(t *testing.T) {
+	const messages = 300
+
+	// The server is throttled deliberately. Over loopback the metadata pass
+	// finishes in milliseconds, so there would be no window in which to observe
+	// an overlap and the test would pass or fail on timing rather than on
+	// behaviour.
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(messages)}},
+		Chaos:     fakeimap.Chaos{SlowBytes: 200_000},
+	}, func(c *config.Config) { c.Sync.MetadataBatchMessages = 25 })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.engine.SyncAccount(ctx, h.accountID, "manual")
+		done <- err
+	}()
+
+	overlapped := false
+	deadline := time.After(4 * time.Minute)
+
+poll:
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("syncing: %v", err)
+			}
+			break poll
+		case <-deadline:
+			t.Fatal("sync did not finish in time")
+		case <-time.After(50 * time.Millisecond):
+			progress, ok := h.engine.ProgressFor(h.accountID)
+			if !ok {
+				continue
+			}
+			if strings.HasPrefix(progress.Phase(), "metadata:") {
+				_, _, _, bodies, _, _ := progress.Counts()
+				if bodies > 0 {
+					overlapped = true
+				}
+			}
+		}
+	}
+
+	if !overlapped {
+		t.Error("no body was downloaded while metadata was still being enumerated; " +
+			"the passes are running in sequence, so nothing is readable until enumeration completes")
+	}
+
+	// And the sync must still be correct: everything ends up stored.
+	var stored int64
+	if err := h.store.Pool().QueryRow(context.Background(),
+		`SELECT count(*) FROM mailbox_messages WHERE body_state = 'stored'`).Scan(&stored); err != nil {
+		t.Fatalf("counting stored bodies: %v", err)
+	}
+	if stored != messages {
+		t.Errorf("stored %d bodies, want %d", stored, messages)
 	}
 }

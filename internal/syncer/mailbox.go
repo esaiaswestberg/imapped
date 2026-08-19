@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -85,18 +86,47 @@ func (e *Engine) syncMailbox(
 		}
 	}
 
-	newMessages, err := e.metadataPass(ctx, client, account, mailbox, selected, p)
-	if err != nil {
-		return result, err
-	}
-	result.MessagesNew = newMessages
+	// The two passes run concurrently.
+	//
+	// They share nothing but the database: the metadata pass writes rows marked
+	// pending, and the body pass claims them. Running them in sequence meant no
+	// message became readable until the last one had been enumerated — on a
+	// mailbox of a hundred thousand messages, hours of a completely empty
+	// interface while the work was in fact proceeding.
+	//
+	// Overlapping them means mail appears within seconds, newest first, while
+	// enumeration continues behind it.
+	metadataDone := make(chan struct{})
 
+	var (
+		bodies, bytes int64
+		bodyErr       error
+		wg            sync.WaitGroup
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		bodies, bytes, bodyErr = e.bodyPass(ctx, account, mailbox, p, metadataDone)
+	}()
+
+	newMessages, metaErr := e.metadataPass(ctx, client, account, mailbox, selected, p)
+
+	// Tell the body pass no further work is coming, whether the metadata pass
+	// succeeded or not: bodies already recorded are still worth downloading,
+	// and leaving the producer waiting would hang the mailbox.
+	close(metadataDone)
 	p.setPhase("bodies: " + box.Name)
-	bodies, bytes, err := e.bodyPass(ctx, client, account, mailbox, p)
+	wg.Wait()
+
+	result.MessagesNew = newMessages
 	result.BodiesFetched = bodies
 	result.BytesFetched = bytes
-	if err != nil {
-		return result, err
+
+	if metaErr != nil {
+		return result, metaErr
+	}
+	if bodyErr != nil {
+		return result, bodyErr
 	}
 
 	if err := e.store.RefreshMailboxCounts(ctx, mailbox.ID); err != nil {
@@ -338,18 +368,13 @@ func (e *Engine) reconcileDeletions(
 // what already succeeded.
 func (e *Engine) bodyPass(
 	ctx context.Context,
-	client *upstream.Client,
 	account store.Account,
 	mailbox store.Mailbox,
 	p *Progress,
+	metadataDone <-chan struct{},
 ) (int64, int64, error) {
-	pending, err := e.store.CountPendingBodies(ctx, mailbox.ID)
-	if err != nil {
-		return 0, 0, err
-	}
-	p.setPendingBodies(pending)
-	if pending == 0 {
-		return 0, 0, nil
+	if pending, err := e.store.CountPendingBodies(ctx, mailbox.ID); err == nil {
+		p.setPendingBodies(pending)
 	}
 
 	budget := BatchBudget{
@@ -358,9 +383,14 @@ func (e *Engine) bodyPass(
 		SoloAbove:   e.cfg.Sync.BodyMaxInlineBytes.Int64(),
 	}
 
-	// The connection used for metadata already has this mailbox selected, so it
-	// becomes worker zero; the rest open their own.
-	workers := e.cfg.Sync.ConnectionsPerAccount
+	// Every worker opens its own connection. Reusing the account's control
+	// connection for worker zero saved one SELECT, but that connection is now
+	// busy enumerating metadata — and sharing it also meant a body-worker
+	// failure could damage the connection every later mailbox depends on.
+	//
+	// One slot is left for the metadata pass, so the total stays within the
+	// per-account budget a provider will tolerate.
+	workers := e.cfg.Sync.ConnectionsPerAccount - 1
 	if workers < 1 {
 		workers = 1
 	}
@@ -371,8 +401,17 @@ func (e *Engine) bodyPass(
 	group, groupCtx := errgroup.WithContext(ctx)
 
 	// Producer: claim work and plan it into batches.
+	//
+	// Finding nothing to claim no longer means the pass is over — the metadata
+	// pass may still be discovering messages. The producer waits for more work
+	// and only stops once metadata has finished and a final sweep comes back
+	// empty, so a message committed moments before that signal is not missed.
 	group.Go(func() error {
 		defer close(batches)
+
+		const idlePoll = 2 * time.Second
+		metadataFinished := false
+
 		for {
 			if err := groupCtx.Err(); err != nil {
 				return err
@@ -383,7 +422,22 @@ func (e *Engine) bodyPass(
 				return err
 			}
 			if len(claimed) == 0 {
-				return nil
+				if metadataFinished {
+					return nil
+				}
+				select {
+				case <-metadataDone:
+					// Sweep once more: metadata may have committed rows between
+					// the claim above and this signal.
+					metadataFinished = true
+				case <-groupCtx.Done():
+					return groupCtx.Err()
+				case <-time.After(idlePoll):
+				}
+				continue
+			}
+			if remaining, err := e.store.CountPendingBodies(groupCtx, mailbox.ID); err == nil {
+				p.setPendingBodies(remaining)
 			}
 
 			sized := make([]SizedUID, 0, len(claimed))
@@ -406,28 +460,25 @@ func (e *Engine) bodyPass(
 
 	for worker := range workers {
 		group.Go(func() error {
-			workerClient := client
-			if worker > 0 {
-				creds, err := e.credentials(account)
-				if err != nil {
-					return err
+			creds, err := e.credentials(account)
+			if err != nil {
+				return err
+			}
+			workerClient, err := e.connect.Connect(groupCtx, creds)
+			if err != nil {
+				// A server refusing further connections is a reason to run with
+				// fewer workers, not to fail the sync.
+				if upstream.IsTooManyConnections(err) {
+					e.log.Info("upstream refused an additional connection, continuing with fewer workers",
+						"account_id", account.ID, "worker", worker)
+					return nil
 				}
-				c, err := e.connect.Connect(groupCtx, creds)
-				if err != nil {
-					// A server refusing further connections is a reason to run
-					// with fewer workers, not to fail the sync.
-					if upstream.IsTooManyConnections(err) {
-						e.log.Info("upstream refused an additional connection, continuing with fewer workers",
-							"account_id", account.ID, "worker", worker)
-						return nil
-					}
-					return err
-				}
-				defer c.Close()
-				if _, err := c.Select(groupCtx, mailbox.Name, true); err != nil {
-					return err
-				}
-				workerClient = c
+				return err
+			}
+			defer workerClient.Close()
+
+			if _, err := workerClient.Select(groupCtx, mailbox.Name, true); err != nil {
+				return err
 			}
 
 			for batch := range batches {
@@ -439,7 +490,7 @@ func (e *Engine) bodyPass(
 		})
 	}
 
-	err = group.Wait()
+	err := group.Wait()
 	return fetched.Load(), bytes.Load(), err
 }
 
