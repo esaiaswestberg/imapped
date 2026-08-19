@@ -8,6 +8,9 @@ WORKDIR /src
 # Dependencies are their own layer so source edits do not re-download the module
 # graph. The cache mount keeps them across builds too.
 COPY go.mod go.sum ./
+# go.mod carries a replace directive pointing into third_party, so the patched
+# dependency has to be present before the module graph can resolve.
+COPY third_party/ ./third_party/
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
