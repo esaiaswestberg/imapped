@@ -1,0 +1,59 @@
+# Production stack.
+#
+# Secrets are read from files rather than the environment, so they do not appear
+# in `docker inspect` or in the process list. Every value below without a
+# default must be set in a .env file alongside this one.
+services:
+  app:
+    image: ghcr.io/esaiaswestberg/imapped:${IMAPPED_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      APP_BASE_URL: ${APP_BASE_URL}
+      DATABASE_URL: postgres://imapped:${POSTGRES_PASSWORD}@postgres:5432/imapped?sslmode=disable
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY}
+      OBJECT_STORE_PATH: /data/blob
+      HTTP_BIND: 0.0.0.0:8080
+      IMAP_PLAINTEXT_BIND: 0.0.0.0:1143
+      IMAP_TLS_BIND: 0.0.0.0:1993
+      IMAP_TLS_CERT_PATH: /certs/imap.crt
+      IMAP_TLS_KEY_PATH: /certs/imap.key
+    ports:
+      - "143:1143"
+      - "993:1993"
+      - "8080:8080"
+    volumes:
+      - app_data:/data
+      - ./certs:/certs:ro
+    healthcheck:
+      test: ["CMD", "/imapped", "config", "check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: imapped
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: imapped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U imapped"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  app_data:
+  postgres_data:
