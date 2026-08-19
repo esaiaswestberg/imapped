@@ -1,7 +1,7 @@
 GO ?= go
 PG_IMAGE ?= postgres:17-alpine
 # Debian rather than Alpine: -race needs cgo, and so a C toolchain.
-GO_IMAGE ?= golang:1.26
+GO_IMAGE ?= golang:1.26.6
 TEST_NET ?= imapped-test
 TEST_PG ?= imapped-pgtest
 TEST_PG_URL ?= postgres://imapped:imapped@$(TEST_PG):5432/postgres?sslmode=disable

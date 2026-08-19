@@ -1,7 +1,7 @@
 # Cross-compilation happens natively on the build host: the builder always runs
 # on $BUILDPLATFORM and targets $TARGETPLATFORM via GOOS/GOARCH. No QEMU is
 # involved, so an arm64 image builds at native speed on an amd64 runner.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine AS build
 
 WORKDIR /src
 
