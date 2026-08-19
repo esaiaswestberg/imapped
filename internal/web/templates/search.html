@@ -1,0 +1,8 @@
+{{define "search.html"}}
+<h1>Search</h1>
+<form class="searchbar" hx-get="/search" hx-target="#results" hx-trigger="submit, keyup changed delay:400ms from:input[name='q']">
+  <input type="search" name="q" value="{{.Content.Query}}" placeholder="Search subjects, senders and message text" autofocus>
+  <button type="submit" class="primary">Search</button>
+</form>
+<div id="results">{{template "search_results.html" .}}</div>
+{{end}}

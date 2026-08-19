@@ -1,0 +1,49 @@
+{{define "account_new.html"}}
+<h1>Add an account</h1>
+<form method="post" action="/accounts" class="card">
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+
+  <label>Display name
+    <input type="text" name="display_name" placeholder="Work mail">
+  </label>
+  <label>Email address
+    <input type="email" name="email" placeholder="you@example.com">
+    <small>Leave blank to use the username below.</small>
+  </label>
+
+  <fieldset>
+    <legend>Mail server</legend>
+    <label>Hostname
+      <input type="text" name="host" required placeholder="imap.example.com">
+    </label>
+    <div class="row">
+      <label>Port
+        <input type="number" name="port" value="993" min="1" max="65535" required>
+      </label>
+      <label>Encryption
+        <select name="tls_mode">
+          <option value="tls" selected>TLS (usually port 993)</option>
+          <option value="starttls">STARTTLS (usually port 143)</option>
+          <option value="plain">None — test servers only</option>
+        </select>
+      </label>
+    </div>
+    <label>Username
+      <input type="text" name="username" required autocomplete="off">
+    </label>
+    <label>Password
+      <input type="password" name="password" required autocomplete="off">
+      <small>Many providers require an app-specific password rather than your account password.</small>
+    </label>
+  </fieldset>
+
+  <div class="actions">
+    <button type="button" hx-post="/accounts/test" hx-include="closest form" hx-target="#test-result">
+      Test connection
+    </button>
+    <button type="submit" class="primary">Add and start syncing</button>
+  </div>
+  <div id="test-result"></div>
+</form>
+{{end}}

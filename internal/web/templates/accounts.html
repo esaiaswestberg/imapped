@@ -1,0 +1,23 @@
+{{define "accounts.html"}}
+<h1>Accounts</h1>
+<p><a class="primary button" href="/accounts/new">Add an account</a></p>
+<table class="list">
+  <thead><tr><th>Address</th><th>Server</th><th>State</th><th>Last synced</th></tr></thead>
+  <tbody>
+  {{range .Content}}
+    <tr>
+      <td><a href="/accounts/{{.ID}}">{{.EmailAddress}}</a></td>
+      <td class="muted">{{.UpstreamHost}}:{{.UpstreamPort}}</td>
+      <td>
+        {{if eq .AuthState "auth_failed"}}<span class="error">Sign-in failed</span>
+        {{else if .SyncPaused}}<span class="warn">Paused</span>
+        {{else}}<span class="ok">Active</span>{{end}}
+      </td>
+      <td class="muted">{{formatAgo .LastSyncAt}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="4" class="muted">No accounts yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

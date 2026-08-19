@@ -1,0 +1,27 @@
+{{define "runs.html"}}
+<h1>Sync history</h1>
+<table class="list">
+  <thead><tr><th>Account</th><th>Started</th><th>Status</th><th>New</th><th>Downloaded</th><th>Commands</th><th>Notes</th></tr></thead>
+  <tbody>
+  {{range .Content}}
+    <tr>
+      <td>{{.Account.EmailAddress}}</td>
+      <td class="muted">{{formatAgo .Run.StartedAt}}</td>
+      <td>
+        {{if .Stale}}<span class="error">stalled</span>
+        {{else}}{{.Run.Status}}{{end}}
+      </td>
+      <td>{{.Run.MessagesNew}}</td>
+      <td>{{.Run.BodiesFetched}}</td>
+      <td>{{.Run.CommandsIssued}}</td>
+      <td class="muted">
+        {{if .Stale}}This run stopped reporting; the process running it exited.
+        {{else if .Run.Error}}{{.Run.Error}}{{end}}
+      </td>
+    </tr>
+  {{else}}
+    <tr><td colspan="7" class="muted">No syncs recorded yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

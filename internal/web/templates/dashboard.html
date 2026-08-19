@@ -1,0 +1,44 @@
+{{define "dashboard.html"}}
+<h1>Dashboard</h1>
+{{if not .Content}}
+  <div class="card empty">
+    <p>No accounts yet.</p>
+    <p><a class="primary button" href="/accounts/new">Add your first account</a></p>
+  </div>
+{{end}}
+<div class="grid">
+{{range .Content}}
+  <section class="card">
+    <h2><a href="/accounts/{{.Account.ID}}">{{.Account.EmailAddress}}</a></h2>
+    <p class="muted">{{.Account.UpstreamHost}}</p>
+
+    {{if eq .Account.AuthState "auth_failed"}}
+      <p class="error">Sign-in to the mail server failed. Syncing is paused until the
+      credentials are corrected, so the provider does not lock the account.</p>
+    {{else if .Account.SyncPaused}}
+      <p class="warn">Syncing is paused.</p>
+    {{end}}
+
+    <dl class="stats">
+      <div><dt>Mailboxes</dt><dd>{{.Stats.Mailboxes}}</dd></div>
+      <div><dt>Messages</dt><dd>{{.Stats.Messages}}</dd></div>
+      <div><dt>Stored</dt><dd>{{formatBytes .Stats.Bytes}}</dd></div>
+      {{if .Stats.PendingBodies}}<div><dt>Downloading</dt><dd>{{.Stats.PendingBodies}}</dd></div>{{end}}
+      {{if .Stats.FailedBodies}}<div><dt class="warn">Failed</dt><dd>{{.Stats.FailedBodies}}</dd></div>{{end}}
+    </dl>
+
+    {{if .Running}}
+      <p class="running">Syncing now — {{.Progress.Phase}}</p>
+      <div class="bar"><div class="fill" style="width:{{.Progress.Percent}}%"></div></div>
+    {{else}}
+      <p class="muted">Last synced {{formatAgo .Account.LastSyncAt}}</p>
+    {{end}}
+
+    <form method="post" action="/accounts/{{.Account.ID}}/sync">
+      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      <button type="submit">Sync now</button>
+    </form>
+  </section>
+{{end}}
+</div>
+{{end}}

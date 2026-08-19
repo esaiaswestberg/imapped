@@ -1,0 +1,9 @@
+{{define "sync.html"}}
+<h1>Sync</h1>
+<p class="muted">This page updates live as syncing proceeds.</p>
+<div hx-ext="sse" sse-connect="/sync/events">
+  <div id="sync-progress" sse-swap="progress">
+    {{template "sync_progress.html" .}}
+  </div>
+</div>
+{{end}}

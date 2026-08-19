@@ -1,0 +1,29 @@
+{{define "mailbox.html"}}
+{{$m := .Content}}
+<h1>{{$m.Mailbox.Name}}</h1>
+<p class="muted">{{$m.Total}} messages</p>
+<table class="list messages">
+  <tbody>
+  {{range $m.Messages}}
+    <tr class="{{if not .Seen}}unread{{end}}">
+      <td class="from">{{firstOr "(unknown sender)" .From}}</td>
+      <td class="subject">
+        <a href="/messages/{{.MailboxMessageID}}">{{.Subject}}</a>
+        {{if .HasAttachments}}<span class="clip" title="Has attachments">&#128206;</span>{{end}}
+        <div class="preview">{{.Preview}}</div>
+        {{if ne .BodyState "stored"}}<span class="pill">{{.BodyState}}</span>{{end}}
+      </td>
+      <td class="when muted">{{formatTime .InternalDate}}</td>
+      <td class="size muted">{{formatBytes .Size}}</td>
+    </tr>
+  {{else}}
+    <tr><td class="muted">No messages in this mailbox yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+<nav class="pager">
+  {{if $m.HasPrev}}<a href="/mailboxes/{{$m.Mailbox.ID}}?page={{sub $m.Page 1}}">Newer</a>{{end}}
+  <span class="muted">Page {{$m.Page}}</span>
+  {{if $m.HasNext}}<a href="/mailboxes/{{$m.Mailbox.ID}}?page={{add $m.Page 1}}">Older</a>{{end}}
+</nav>
+{{end}}

@@ -1,0 +1,23 @@
+{{define "search_results.html"}}
+{{$s := .Content}}
+{{if $s.Ran}}
+  <p class="muted">{{len $s.Results}} of {{$s.Total}} matches for “{{$s.Query}}”</p>
+  <table class="list messages">
+    <tbody>
+    {{range $s.Results}}
+      <tr>
+        <td class="from">{{firstOr "(unknown sender)" .From}}</td>
+        <td class="subject">
+          <a href="/messages/{{.MailboxMessageID}}">{{.Subject}}</a>
+          <div class="preview">{{.Highlight}}</div>
+          <span class="muted">in {{.MailboxName}}</span>
+        </td>
+        <td class="when muted">{{formatTime .InternalDate}}</td>
+      </tr>
+    {{else}}
+      <tr><td class="muted">Nothing matched that search.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+{{end}}
+{{end}}

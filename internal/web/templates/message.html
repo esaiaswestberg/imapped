@@ -1,0 +1,43 @@
+{{define "message.html"}}
+{{$m := .Content}}
+<article class="card message">
+  <h1>{{$m.Subject}}</h1>
+  <dl class="headers">
+    <div><dt>From</dt><dd>{{join ", " $m.From}}</dd></div>
+    {{if $m.To}}<div><dt>To</dt><dd>{{join ", " $m.To}}</dd></div>{{end}}
+    {{if $m.Cc}}<div><dt>Cc</dt><dd>{{join ", " $m.Cc}}</dd></div>{{end}}
+    <div><dt>Date</dt><dd>{{formatTime $m.InternalDate}}</dd></div>
+    <div><dt>Mailbox</dt><dd><a href="/mailboxes/{{$m.MailboxID}}">{{$m.MailboxName}}</a></dd></div>
+  </dl>
+
+  {{if $m.ParseFailed}}
+    <p class="warn">This message could not be fully parsed, so the text below may be
+    incomplete. The original is intact and can still be downloaded.
+    {{if $m.ParseError}}<br><small>{{$m.ParseError}}</small>{{end}}</p>
+  {{end}}
+
+  {{if eq $m.BodyState "stored"}}
+    <pre class="body">{{$m.BodyText}}</pre>
+  {{else}}
+    <p class="muted">The body of this message has not been downloaded yet ({{$m.BodyState}}).</p>
+  {{end}}
+
+  {{if $m.Parts}}
+  <h2>Parts</h2>
+  <ul class="parts">
+    {{range $m.Parts}}
+      <li>
+        {{if .BlobKey}}
+          <a href="/messages/{{$m.MailboxMessageID}}/parts/{{.Path}}">{{if .Filename}}{{.Filename}}{{else}}part {{.Path}}{{end}}</a>
+        {{else}}
+          {{if .Filename}}{{.Filename}}{{else}}part {{.Path}}{{end}}
+        {{end}}
+        <span class="muted">{{.ContentType}} · {{formatBytes .Size}}</span>
+      </li>
+    {{end}}
+  </ul>
+  {{end}}
+
+  <p><a href="/messages/{{$m.MailboxMessageID}}/raw">Download the original message</a></p>
+</article>
+{{end}}
