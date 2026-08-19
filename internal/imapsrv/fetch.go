@@ -205,10 +205,9 @@ func fromFlags(flags []imap.Flag) []string {
 
 // Store applies a flag change from a client.
 //
-// Changes are local only in this release. The upstream replay queue exists in
-// the schema but is not wired up, so telling a client the change succeeded
-// while it never reaches the server would be a lie; it is accepted locally and
-// reported honestly as such.
+// The change is applied locally and queued for replay upstream. Acting locally
+// first means the client sees its action take effect immediately and an
+// upstream outage delays the push rather than blocking the user.
 func (s *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet,
 	flags *imap.StoreFlags, options *imap.StoreOptions) error {
 
@@ -231,6 +230,18 @@ func (s *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet,
 			return internalError(err)
 		}
 		item.message.Flags = updated
+
+		// Queue the change for the upstream server. Failing to queue it would
+		// leave the local and remote states silently divergent, so it is
+		// reported rather than ignored.
+		if err := s.backend.store.EnqueueMutation(ctx, s.account.ID, s.mailbox.ID,
+			store.MutationStoreFlags, store.FlagPayload{
+				UpstreamUID: upstreamUIDOf(item.message),
+				Mailbox:     s.mailbox.Name,
+				Flags:       updated,
+			}); err != nil {
+			return internalError(err)
+		}
 
 		if !flags.Silent {
 			writer := w.CreateMessage(item.seqNum)
@@ -266,6 +277,15 @@ func applyFlagChange(current []string, change *imap.StoreFlags) []string {
 		return kept
 	}
 	return current
+}
+
+// upstreamUIDOf returns the message's UID on the upstream server.
+//
+// Locally-visible UIDs are ours and mean nothing remotely; for messages
+// mirrored from upstream the two happen to be seeded alike, but the mapping is
+// what the replay needs.
+func upstreamUIDOf(m store.MessageSummary) int64 {
+	return m.UpstreamUID
 }
 
 func dedupe(values []string) []string {

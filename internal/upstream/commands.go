@@ -227,3 +227,34 @@ func (c *Client) SearchAllUIDs(ctx context.Context) ([]imap.UID, error) {
 	}
 	return uids, nil
 }
+
+// StoreFlags replaces the flags on a message upstream.
+//
+// FLAGS.SILENT rather than FLAGS: we already know the resulting state, and
+// suppressing the untagged response avoids a round trip's worth of data we
+// would only discard.
+func (c *Client) StoreFlags(ctx context.Context, uid imap.UID, flags []imap.Flag) error {
+	if err := c.checkUsable(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.cfg.CommandTimeout.Std())
+	defer cancel()
+
+	var set imap.UIDSet
+	set.AddNum(uid)
+
+	err := c.withDeadline(ctx, func() error {
+		cmd := c.imap.Store(set, &imap.StoreFlags{
+			Op:     imap.StoreFlagsSet,
+			Flags:  flags,
+			Silent: true,
+		}, nil)
+		// Even a silent STORE returns a command completion that must be
+		// consumed before the connection can be reused.
+		return cmd.Close()
+	})
+	if err != nil {
+		return fmt.Errorf("setting flags on UID %d: %w", uid, classify(err))
+	}
+	return nil
+}

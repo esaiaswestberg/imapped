@@ -130,6 +130,7 @@ func run(ctx context.Context, res *config.Result) error {
 
 	if cfg.Sync.Enabled {
 		group.Go(func() error { return syncLoop(ctx, application) })
+		group.Go(func() error { return replayLoop(ctx, application) })
 		group.Go(func() error { return maintenanceLoop(ctx, application) })
 	} else {
 		log.Info("background syncing is disabled; syncs must be started from the interface")
@@ -214,6 +215,41 @@ func syncAll(ctx context.Context, a *app.App, trigger string) {
 	_ = group.Wait()
 }
 
+// replayLoop pushes locally-made changes to the upstream servers.
+//
+// Runs on a much shorter cycle than the sync itself: a user flagging a message
+// expects it to reach the server in seconds, whereas discovering new mail can
+// wait for the next scheduled sync.
+func replayLoop(ctx context.Context, a *app.App) error {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			accounts, err := a.Store.ListSyncableAccounts(ctx)
+			if err != nil {
+				a.Log.Error("listing accounts for change replay", "error", err)
+				continue
+			}
+			for _, account := range accounts {
+				applied, err := a.Engine.ReplayMutations(ctx, account.ID)
+				if err != nil {
+					a.Log.Warn("replaying changes upstream",
+						"account_id", account.ID, "error", err)
+					continue
+				}
+				if applied > 0 {
+					a.Log.Info("replayed local changes upstream",
+						"account_id", account.ID, "count", applied)
+				}
+			}
+		}
+	}
+}
+
 // maintenanceLoop performs periodic housekeeping.
 func maintenanceLoop(ctx context.Context, a *app.App) error {
 	ticker := time.NewTicker(5 * time.Minute)
@@ -230,6 +266,13 @@ func maintenanceLoop(ctx context.Context, a *app.App) error {
 				a.Log.Warn("reaping abandoned message claims", "error", err)
 			} else if n > 0 {
 				a.Log.Info("returned abandoned messages to the download queue", "count", n)
+			}
+			// Changes claimed by a process that died would otherwise stay
+			// in flight and never reach the upstream server.
+			if n, err := a.Engine.ReleaseStaleMutations(ctx, 15*time.Minute); err != nil {
+				a.Log.Warn("releasing abandoned change claims", "error", err)
+			} else if n > 0 {
+				a.Log.Info("returned abandoned changes to the replay queue", "count", n)
 			}
 			if _, err := a.Store.DeleteExpiredSessions(ctx); err != nil {
 				a.Log.Warn("removing expired sessions", "error", err)

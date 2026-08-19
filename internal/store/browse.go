@@ -12,14 +12,17 @@ type MessageSummary struct {
 	MailboxMessageID int64
 	MessageID        int64
 	LocalUID         int64
-	Subject          string
-	From             []string
-	Preview          string
-	InternalDate     *time.Time
-	Size             int64
-	Flags            []string
-	BodyState        string
-	HasAttachments   bool
+	// UpstreamUID is the message's identity on the mirrored server, zero if it
+	// has never existed there.
+	UpstreamUID    int64
+	Subject        string
+	From           []string
+	Preview        string
+	InternalDate   *time.Time
+	Size           int64
+	Flags          []string
+	BodyState      string
+	HasAttachments bool
 }
 
 // Seen reports whether the message has been read.
@@ -39,7 +42,8 @@ func (s *Store) ListMessages(ctx context.Context, mailboxID int64, limit, offset
 	}
 
 	rows, err := s.pool.Query(ctx,
-		`SELECT mm.id, m.id, mm.local_uid, COALESCE(m.subject, '(no subject)'),
+		`SELECT mm.id, m.id, mm.local_uid, COALESCE(mm.upstream_uid, 0),
+		        COALESCE(m.subject, '(no subject)'),
 		        COALESCE(m.addrs->'from', '[]'::jsonb), COALESCE(m.preview, ''),
 		        m.internal_date, m.rfc822_size, mm.flags, mm.body_state,
 		        EXISTS (SELECT 1 FROM mime_parts p
@@ -64,9 +68,9 @@ func (s *Store) ListMessages(ctx context.Context, mailboxID int64, limit, offset
 			m        MessageSummary
 			fromJSON []byte
 		)
-		if err := rows.Scan(&m.MailboxMessageID, &m.MessageID, &m.LocalUID, &m.Subject,
-			&fromJSON, &m.Preview, &m.InternalDate, &m.Size, &m.Flags, &m.BodyState,
-			&m.HasAttachments, &total); err != nil {
+		if err := rows.Scan(&m.MailboxMessageID, &m.MessageID, &m.LocalUID, &m.UpstreamUID,
+			&m.Subject, &fromJSON, &m.Preview, &m.InternalDate, &m.Size, &m.Flags,
+			&m.BodyState, &m.HasAttachments, &total); err != nil {
 			return nil, 0, fmt.Errorf("scanning message: %w", err)
 		}
 		m.From = decodeStrings(fromJSON)
@@ -116,7 +120,8 @@ func (s *Store) GetMessage(ctx context.Context, mailboxMessageID int64) (Message
 	)
 
 	err := s.pool.QueryRow(ctx,
-		`SELECT mm.id, m.id, mm.local_uid, COALESCE(m.subject,'(no subject)'),
+		`SELECT mm.id, m.id, mm.local_uid, COALESCE(mm.upstream_uid, 0),
+		        COALESCE(m.subject,'(no subject)'),
 		        COALESCE(m.addrs,'{}'::jsonb), COALESCE(m.preview,''),
 		        m.internal_date, m.rfc822_size, mm.flags, mm.body_state,
 		        m.body_text, m.blob_key, m.message_id_hdr, m.parse_failed, m.parse_error,
@@ -125,7 +130,7 @@ func (s *Store) GetMessage(ctx context.Context, mailboxMessageID int64) (Message
 		 JOIN messages m ON m.id = mm.message_id
 		 JOIN mailboxes mb ON mb.id = mm.mailbox_id
 		 WHERE mm.id = $1`, mailboxMessageID).
-		Scan(&d.MailboxMessageID, &d.MessageID, &d.LocalUID, &d.Subject,
+		Scan(&d.MailboxMessageID, &d.MessageID, &d.LocalUID, &d.UpstreamUID, &d.Subject,
 			&addrs, &d.Preview, &d.InternalDate, &d.Size, &d.Flags, &d.BodyState,
 			&bodyText, &blobKey, &msgID, &d.ParseFailed, &errText,
 			&d.MailboxID, &d.MailboxName, &d.AccountID)
@@ -215,7 +220,8 @@ func decodeStrings(raw []byte) []string {
 // message in UID order. A limit of zero returns everything, which is what a
 // SELECT needs in order to build its snapshot.
 func (s *Store) ListMessagesByUID(ctx context.Context, mailboxID int64, limit, offset int) ([]MessageSummary, int64, error) {
-	query := `SELECT mm.id, m.id, mm.local_uid, COALESCE(m.subject, ''),
+	query := `SELECT mm.id, m.id, mm.local_uid, COALESCE(mm.upstream_uid, 0),
+	                 COALESCE(m.subject, ''),
 	                 COALESCE(m.addrs->'from', '[]'::jsonb), COALESCE(m.preview, ''),
 	                 m.internal_date, m.rfc822_size, mm.flags, mm.body_state,
 	                 EXISTS (SELECT 1 FROM mime_parts p
@@ -246,9 +252,9 @@ func (s *Store) ListMessagesByUID(ctx context.Context, mailboxID int64, limit, o
 			m        MessageSummary
 			fromJSON []byte
 		)
-		if err := rows.Scan(&m.MailboxMessageID, &m.MessageID, &m.LocalUID, &m.Subject,
-			&fromJSON, &m.Preview, &m.InternalDate, &m.Size, &m.Flags, &m.BodyState,
-			&m.HasAttachments, &total); err != nil {
+		if err := rows.Scan(&m.MailboxMessageID, &m.MessageID, &m.LocalUID, &m.UpstreamUID,
+			&m.Subject, &fromJSON, &m.Preview, &m.InternalDate, &m.Size, &m.Flags,
+			&m.BodyState, &m.HasAttachments, &total); err != nil {
 			return nil, 0, fmt.Errorf("scanning message: %w", err)
 		}
 		m.From = decodeStrings(fromJSON)

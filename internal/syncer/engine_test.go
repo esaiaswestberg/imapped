@@ -432,3 +432,84 @@ func TestSyncPopulatesMessageContent(t *testing.T) {
 		t.Errorf("body text = %q", bodyText)
 	}
 }
+
+// A flag change made locally must reach the upstream server.
+func TestFlagChangesReplayUpstream(t *testing.T) {
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(5)}},
+	})
+	ctx := context.Background()
+
+	h.sync(t)
+
+	// Find a message and mark it flagged locally, as a mail client would.
+	var mailboxID, upstreamUID int64
+	err := h.store.Pool().QueryRow(ctx,
+		`SELECT mailbox_id, upstream_uid FROM mailbox_messages
+		 WHERE upstream_uid IS NOT NULL ORDER BY upstream_uid LIMIT 1`).
+		Scan(&mailboxID, &upstreamUID)
+	if err != nil {
+		t.Fatalf("finding a message: %v", err)
+	}
+
+	if err := h.store.EnqueueMutation(ctx, h.accountID, mailboxID,
+		store.MutationStoreFlags, store.FlagPayload{
+			UpstreamUID: upstreamUID,
+			Mailbox:     "INBOX",
+			Flags:       []string{`\Seen`, `\Flagged`},
+		}); err != nil {
+		t.Fatalf("queueing the change: %v", err)
+	}
+
+	pending, err := h.store.CountPendingMutations(ctx, h.accountID)
+	if err != nil {
+		t.Fatalf("counting queued changes: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("%d changes queued, want 1", pending)
+	}
+
+	applied, err := h.engine.ReplayMutations(ctx, h.accountID)
+	if err != nil {
+		t.Fatalf("replaying: %v", err)
+	}
+	if applied != 1 {
+		t.Errorf("replayed %d changes, want 1", applied)
+	}
+
+	if remaining, err := h.store.CountPendingMutations(ctx, h.accountID); err != nil {
+		t.Fatalf("counting queued changes: %v", err)
+	} else if remaining != 0 {
+		t.Errorf("%d changes still queued after a successful replay", remaining)
+	}
+
+	// The server must actually have been told: a STORE should appear in its log.
+	if h.server.Recorder().Count("STORE") == 0 {
+		t.Error("no STORE command reached the upstream server")
+	}
+}
+
+// Queueing the same logical change twice must collapse to one replay.
+func TestDuplicateChangesCollapse(t *testing.T) {
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(2)}},
+	})
+	ctx := context.Background()
+	h.sync(t)
+
+	payload := store.FlagPayload{UpstreamUID: 1, Mailbox: "INBOX", Flags: []string{`\Seen`}}
+	for range 3 {
+		if err := h.store.EnqueueMutation(ctx, h.accountID, 1,
+			store.MutationStoreFlags, payload); err != nil {
+			t.Fatalf("queueing: %v", err)
+		}
+	}
+
+	pending, err := h.store.CountPendingMutations(ctx, h.accountID)
+	if err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	if pending != 1 {
+		t.Errorf("queueing the same change three times produced %d entries, want 1", pending)
+	}
+}
