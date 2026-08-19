@@ -112,10 +112,16 @@ type Sync struct {
 	AccountsConcurrent int      `toml:"accounts_concurrent" env:"SYNC_ACCOUNTS_CONCURRENT"`
 	// ConnectionsPerAccount is the body-fetch worker pool size per account.
 	ConnectionsPerAccount int `toml:"connections_per_account" env:"SYNC_CONNECTIONS_PER_ACCOUNT"`
-	// MetadataBatchUIDs chunks the pass-1 UID range so a failure loses one chunk.
-	MetadataBatchUIDs int      `toml:"metadata_batch_uids" env:"SYNC_METADATA_BATCH_UIDS"`
-	BodyBatchBytes    ByteSize `toml:"body_batch_bytes" env:"SYNC_BODY_BATCH_BYTES"`
-	BodyBatchMaxMsgs  int      `toml:"body_batch_max_msgs" env:"SYNC_BODY_BATCH_MAX_MSGS"`
+	// MetadataBatchUIDs is deprecated and ignored: chunking is by message count
+	// now, because a UID span says nothing about how many messages it covers.
+	// Retained because an unknown key in the configuration file is a startup
+	// error, so removing it would break existing deployments.
+	MetadataBatchUIDs int `toml:"metadata_batch_uids" env:"SYNC_METADATA_BATCH_UIDS"`
+
+	// MetadataBatchMessages bounds how many messages one metadata FETCH covers.
+	MetadataBatchMessages int      `toml:"metadata_batch_messages" env:"SYNC_METADATA_BATCH_MESSAGES"`
+	BodyBatchBytes        ByteSize `toml:"body_batch_bytes" env:"SYNC_BODY_BATCH_BYTES"`
+	BodyBatchMaxMsgs      int      `toml:"body_batch_max_msgs" env:"SYNC_BODY_BATCH_MAX_MSGS"`
 	// BodyMaxInlineBytes: messages above this get a batch to themselves.
 	BodyMaxInlineBytes ByteSize `toml:"body_max_inline_bytes" env:"SYNC_BODY_MAX_INLINE_BYTES"`
 	BodyMaxAttempts    int      `toml:"body_max_attempts" env:"SYNC_BODY_MAX_ATTEMPTS"`
@@ -208,7 +214,7 @@ func Default() Config {
 			GreetingTimeout:      Duration(15 * time.Second),
 			IOIdleTimeout:        Duration(60 * time.Second),
 			CommandTimeout:       Duration(30 * time.Second),
-			FetchMetadataTimeout: Duration(180 * time.Second),
+			FetchMetadataTimeout: Duration(10 * time.Minute),
 			FetchBodyTimeout:     Duration(60 * time.Second),
 			TCPUserTimeout:       Duration(60 * time.Second),
 			TCPKeepAlive:         Duration(30 * time.Second),
@@ -226,6 +232,7 @@ func Default() Config {
 			AccountsConcurrent:    4,
 			ConnectionsPerAccount: 4,
 			MetadataBatchUIDs:     20000,
+			MetadataBatchMessages: 500,
 			BodyBatchBytes:        ByteSize(4 << 20),
 			BodyBatchMaxMsgs:      50,
 			BodyMaxInlineBytes:    ByteSize(32 << 20),

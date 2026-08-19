@@ -149,8 +149,8 @@ func (c Config) Validate() error {
 	if c.Sync.ConnectionsPerAccount < 1 || c.Sync.ConnectionsPerAccount > 16 {
 		add("sync.connections_per_account must be between 1 and 16, got %d", c.Sync.ConnectionsPerAccount)
 	}
-	if c.Sync.MetadataBatchUIDs < 1 {
-		add("sync.metadata_batch_uids must be at least 1, got %d", c.Sync.MetadataBatchUIDs)
+	if c.Sync.MetadataBatchMessages < 1 {
+		add("sync.metadata_batch_messages must be at least 1, got %d", c.Sync.MetadataBatchMessages)
 	}
 	if c.Sync.BodyBatchMaxMsgs < 1 {
 		add("sync.body_batch_max_msgs must be at least 1, got %d", c.Sync.BodyBatchMaxMsgs)

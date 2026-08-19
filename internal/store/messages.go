@@ -60,6 +60,42 @@ func (s *Store) UpsertMetadata(ctx context.Context, m MessageMeta) (int64, bool,
 		created          bool
 	)
 
+	err := s.InTx(ctx, func(tx pgxTx) error {
+		var err error
+		mailboxMessageID, created, err = upsertMetadataTx(ctx, tx, m)
+		return err
+	})
+
+	return mailboxMessageID, created, err
+}
+
+// UpsertMetadataBatch records many messages in one transaction.
+//
+// The metadata pass previously opened a transaction per message — several
+// thousand for a large mailbox, each a round trip and a commit. Batching keeps
+// the ingest fast enough that it never becomes the reason a streaming response
+// stalls, which is the failure this whole area exists to avoid.
+func (s *Store) UpsertMetadataBatch(ctx context.Context, metas []MessageMeta) (created int64, err error) {
+	if len(metas) == 0 {
+		return 0, nil
+	}
+	err = s.InTx(ctx, func(tx pgxTx) error {
+		for _, m := range metas {
+			_, wasCreated, err := upsertMetadataTx(ctx, tx, m)
+			if err != nil {
+				return err
+			}
+			if wasCreated {
+				created++
+			}
+		}
+		return nil
+	})
+	return created, err
+}
+
+// upsertMetadataTx is the shared body of the single and batch paths.
+func upsertMetadataTx(ctx context.Context, tx pgxTx, m MessageMeta) (mailboxMessageID int64, created bool, err error) {
 	// These columns are NOT NULL with an empty-array default, and a nil Go
 	// slice marshals to NULL rather than to that default.
 	if m.References == nil {
@@ -69,28 +105,27 @@ func (s *Store) UpsertMetadata(ctx context.Context, m MessageMeta) (int64, bool,
 		m.Flags = []string{}
 	}
 
-	err := s.InTx(ctx, func(tx pgxTx) error {
+	{
 		placeholder := placeholderDigest(m.MailboxID, m.UpstreamUID)
 
 		var messageID int64
 		err := tx.QueryRow(ctx,
+			// envelope and bodystructure are deliberately not written: both
+			// columns are dead, and the downstream server derives body
+			// structure from the stored message instead.
 			`INSERT INTO messages (
 			     account_id, rfc822_sha256, rfc822_size, message_id_hdr, in_reply_to,
-			     refs, subject, addrs, envelope, bodystructure, internal_date, sent_date)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7,
-			         COALESCE($8, '{}'::jsonb), COALESCE($9, '{}'::jsonb),
-			         COALESCE($10, '{}'::jsonb), $11, $12)
+			     refs, subject, addrs, internal_date, sent_date)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, '{}'::jsonb), $9, $10)
 			 ON CONFLICT (account_id, rfc822_sha256) DO UPDATE
 			   SET subject = EXCLUDED.subject,
-			       envelope = EXCLUDED.envelope,
-			       bodystructure = EXCLUDED.bodystructure,
 			       updated_at = now()
 			 RETURNING id`,
 			m.AccountID, placeholder, m.Size, m.MessageID, m.InReplyTo,
-			m.References, m.Subject, nullableJSON(m.Addrs), nullableJSON(m.Envelope),
-			nullableJSON(m.BodyStructure), m.InternalDate, m.SentDate).Scan(&messageID)
+			m.References, m.Subject, nullableJSON(m.Addrs),
+			m.InternalDate, m.SentDate).Scan(&messageID)
 		if err != nil {
-			return fmt.Errorf("upserting message: %w", err)
+			return 0, false, fmt.Errorf("upserting message: %w", err)
 		}
 
 		// local_uid is allocated from a per-mailbox counter and never reused, so
@@ -112,12 +147,10 @@ func (s *Store) UpsertMetadata(ctx context.Context, m MessageMeta) (int64, bool,
 			m.MailboxID, messageID, m.UpstreamUID, nullableInt(m.UpstreamModSeq),
 			m.Flags, string(BodyPending)).Scan(&mailboxMessageID, &created)
 		if err != nil {
-			return fmt.Errorf("upserting mailbox message: %w", err)
+			return 0, false, fmt.Errorf("upserting mailbox message: %w", err)
 		}
-		return nil
-	})
-
-	return mailboxMessageID, created, err
+	}
+	return mailboxMessageID, created, nil
 }
 
 // UpdateFlags applies a flag change reported by the server.

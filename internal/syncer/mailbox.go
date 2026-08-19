@@ -62,11 +62,11 @@ func (e *Engine) syncMailbox(
 		return result, err
 	}
 
+	p.addCommands(1)
 	selected, err := client.Select(ctx, box.Name, true)
 	if err != nil {
 		return result, err
 	}
-	p.addCommands(1)
 
 	// A changed UIDVALIDITY means the server renumbered the mailbox and every
 	// UID we hold is meaningless. Messages are kept and re-linked by content
@@ -90,7 +90,6 @@ func (e *Engine) syncMailbox(
 		return result, err
 	}
 	result.MessagesNew = newMessages
-	p.addMessages(newMessages)
 
 	p.setPhase("bodies: " + box.Name)
 	bodies, bytes, err := e.bodyPass(ctx, client, account, mailbox, p)
@@ -156,11 +155,11 @@ func (e *Engine) metadataPass(
 	// Flag changes on messages already known, when the server can tell us
 	// exactly which ones moved.
 	if condStore && storedModSeq > 0 {
+		p.addCommands(1)
 		changed, err := client.FetchMetadata(ctx, UIDRange(1), uint64(storedModSeq), false)
 		if err != nil {
 			return newMessages, err
 		}
-		p.addCommands(1)
 		for _, meta := range changed {
 			if err := e.store.UpdateFlags(ctx, mailbox.ID, int64(meta.UID),
 				flagNames(meta.Flags), int64(meta.ModSeq)); err != nil {
@@ -172,11 +171,15 @@ func (e *Engine) metadataPass(
 		}
 	}
 
-	// Full metadata for messages not yet recorded.
-	from := imap.UID(1)
-	if condStore && mailbox.MetadataSyncedThroughUID > 0 {
-		// Everything below the watermark is already known; only look above it.
-		from = imap.UID(mailbox.MetadataSyncedThroughUID + 1)
+	// Enumerate the exact UIDs present, then chunk by message count.
+	//
+	// Asking the server which UIDs exist costs one cheap command and removes
+	// all guesswork: UID spans say nothing about how many messages they cover
+	// once deletions have left holes, and UIDNEXT can lag on some servers.
+	p.addCommands(1)
+	allUIDs, err := client.SearchAllUIDs(ctx)
+	if err != nil {
+		return newMessages, err
 	}
 
 	known, err := e.store.ExistingUpstreamUIDs(ctx, mailbox.ID)
@@ -184,20 +187,39 @@ func (e *Engine) metadataPass(
 		return newMessages, err
 	}
 
-	highestSeen := mailbox.MetadataSyncedThroughUID
-	chunks := e.metadataChunks(from, selected)
+	// Skip what is already recorded, so a re-sync only asks about the rest.
+	pending := make([]imap.UID, 0, len(allUIDs))
+	for _, uid := range allUIDs {
+		if _, exists := known[int64(uid)]; exists && condStore {
+			continue
+		}
+		pending = append(pending, uid)
+	}
 
-	for _, chunk := range chunks {
+	highestSeen := mailbox.MetadataSyncedThroughUID
+	chunks := PlanMetadataChunks(pending, e.cfg.Sync.MetadataBatchMessages)
+
+	e.log.Debug("metadata pass planned",
+		"mailbox", mailbox.Name, "present", len(allUIDs),
+		"to_fetch", len(pending), "chunks", len(chunks))
+
+	batch := make([]store.MessageMeta, 0, e.cfg.Sync.MetadataBatchMessages)
+
+	for i, chunk := range chunks {
 		if err := ctx.Err(); err != nil {
 			return newMessages, err
 		}
 
+		// Counted before the command, not after: a command that ran for
+		// minutes and then failed still happened, and a run that reports fewer
+		// commands than it issued is misleading precisely when it matters.
+		p.addCommands(1)
 		metas, err := client.FetchMetadata(ctx, chunk, 0, true)
 		if err != nil {
 			return newMessages, err
 		}
-		p.addCommands(1)
 
+		batch = batch[:0]
 		for _, meta := range metas {
 			uid := int64(meta.UID)
 			if uid > highestSeen {
@@ -214,13 +236,22 @@ func (e *Engine) metadataPass(
 				}
 				continue
 			}
-
-			if _, created, err := e.store.UpsertMetadata(ctx, buildMeta(account.ID, mailbox.ID, meta)); err != nil {
-				return newMessages, fmt.Errorf("recording message UID %d: %w", uid, err)
-			} else if created {
-				newMessages++
-			}
+			batch = append(batch, buildMeta(account.ID, mailbox.ID, meta))
 		}
+
+		// One transaction per chunk rather than one per message: several
+		// thousand commits would make ingest, not the network, the bottleneck.
+		created, err := e.store.UpsertMetadataBatch(ctx, batch)
+		if err != nil {
+			return newMessages, fmt.Errorf("recording metadata chunk %d: %w", i+1, err)
+		}
+		newMessages += created
+
+		// Credited per chunk so the interface moves during a long pass, and so
+		// a pass that fails partway still reports what it committed.
+		p.addMessages(created)
+		p.setPhase(fmt.Sprintf("metadata: %s (%d/%d)",
+			mailbox.Name, min((i+1)*e.cfg.Sync.MetadataBatchMessages, len(pending)), len(pending)))
 
 		// Checkpoint after each chunk, so an interruption costs one chunk
 		// rather than the whole pass.
@@ -252,24 +283,6 @@ func (e *Engine) metadataPass(
 	}
 
 	return newMessages, nil
-}
-
-// metadataChunks decides how to slice the enumeration.
-func (e *Engine) metadataChunks(from imap.UID, selected *upstream.SelectedMailbox) []imap.UIDSet {
-	// An empty mailbox needs no enumeration at all.
-	if selected.NumMessages == 0 {
-		return nil
-	}
-	upper := imap.UID(0)
-	if selected.UIDNext > 0 {
-		upper = selected.UIDNext - 1
-	}
-	if upper < from {
-		// Nothing above the watermark; still ask, since UIDNEXT can lag on
-		// some servers and an open-ended range is one cheap command.
-		return []imap.UIDSet{UIDRange(from)}
-	}
-	return ChunkUIDRange(from, upper, e.cfg.Sync.MetadataBatchUIDs)
 }
 
 // reconcileDeletions removes messages that no longer exist upstream.

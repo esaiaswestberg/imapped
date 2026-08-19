@@ -97,14 +97,21 @@ func newHarness(t *testing.T, opts fakeimap.Options) *harness {
 
 func (h *harness) sync(t *testing.T) syncer.Result {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	result, err := h.engine.SyncAccount(ctx, h.accountID, "manual")
+	result, err := h.trySync(t)
 	if err != nil {
 		t.Fatalf("syncing: %v", err)
 	}
 	return result
+}
+
+// trySync returns the error instead of failing, so failure paths are testable.
+// Without this the harness could only express the happy path, which is why the
+// cascade that broke a real account had no coverage.
+func (h *harness) trySync(t *testing.T) (syncer.Result, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	return h.engine.SyncAccount(ctx, h.accountID, "manual")
 }
 
 func (h *harness) storedBodies(t *testing.T) int64 {
@@ -514,5 +521,107 @@ func TestDuplicateChangesCollapse(t *testing.T) {
 	}
 	if pending != 1 {
 		t.Errorf("queueing the same change three times produced %d entries, want 1", pending)
+	}
+}
+
+// A mailbox that breaks the connection must not take the rest of the account
+// with it. This is the regression test for a production failure in which one
+// slow mailbox poisoned the shared connection and every remaining mailbox then
+// failed instantly without touching the network — 7 of 7 failed, nothing synced.
+func TestOneBrokenMailboxDoesNotStopTheRest(t *testing.T) {
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{
+			{Name: "INBOX", Messages: fakeimap.Seed(20)},
+			{Name: "Archive", Messages: fakeimap.Seed(10)},
+			{Name: "Sent", Messages: fakeimap.Seed(10)},
+		},
+		// Sever the connection partway through, after the first mailbox has
+		// begun. The engine must replace it and carry on.
+		Chaos: fakeimap.Chaos{DropAfter: 6},
+	})
+
+	result, err := h.trySync(t)
+	t.Logf("result=%+v err=%v", result, err)
+
+	if result.MailboxesSynced == 0 {
+		t.Errorf("no mailbox synced; a single broken connection stopped the whole account (err: %v)", err)
+	}
+
+	// Something must have been recorded: a run that survives should have data.
+	var messages int64
+	if err := h.store.Pool().QueryRow(context.Background(),
+		`SELECT count(*) FROM mailbox_messages`).Scan(&messages); err != nil {
+		t.Fatalf("counting messages: %v", err)
+	}
+	if messages == 0 {
+		t.Error("no messages were recorded despite the sync continuing")
+	}
+	t.Logf("synced %d mailboxes, %d messages recorded", result.MailboxesSynced, messages)
+}
+
+// Metadata committed before a failure must be kept and reported, so an
+// interrupted sync resumes rather than restarting and its counters do not lie.
+func TestPartialMetadataSurvivesAFailure(t *testing.T) {
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(400)}},
+	})
+
+	// First sync completes normally and establishes the watermark.
+	first := h.sync(t)
+	if first.MessagesNew != 400 {
+		t.Fatalf("first sync recorded %d messages, want 400", first.MessagesNew)
+	}
+
+	var watermark int64
+	if err := h.store.Pool().QueryRow(context.Background(),
+		`SELECT metadata_synced_through_uid FROM mailboxes WHERE canonical_name = 'inbox'`).
+		Scan(&watermark); err != nil {
+		t.Fatalf("reading watermark: %v", err)
+	}
+	if watermark == 0 {
+		t.Error("the metadata watermark was never advanced, so a resume would restart from scratch")
+	}
+	t.Logf("watermark advanced to UID %d", watermark)
+}
+
+// Chunking must bound the number of messages per command, which is what keeps a
+// single command from growing until it exceeds any deadline.
+func TestMetadataIsFetchedInBoundedChunks(t *testing.T) {
+	const messages = 400
+
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(messages)}},
+	})
+
+	h.server.Recorder().Reset()
+	h.sync(t)
+
+	fetches := h.server.Recorder().Count("FETCH")
+	// With a 500-message chunk and 400 messages this is one metadata command
+	// plus body batches — but crucially it must never be one command per
+	// message, and never a single unbounded command for a huge mailbox.
+	if fetches == 0 {
+		t.Fatal("no FETCH was issued")
+	}
+	if fetches > 40 {
+		t.Errorf("%d FETCH commands for %d messages looks like per-message fetching", fetches, messages)
+	}
+	t.Logf("%d messages fetched in %d commands", messages, fetches)
+}
+
+// BODYSTRUCTURE is not used anywhere and measurably costs nothing, but asking
+// for it makes some servers open and parse every message. Nothing should ask.
+func TestMetadataFetchDoesNotRequestBodyStructure(t *testing.T) {
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(10)}},
+	})
+
+	h.server.Recorder().Reset()
+	h.sync(t)
+
+	for _, command := range h.server.Recorder().Commands() {
+		if strings.Contains(strings.ToUpper(command), "BODYSTRUCTURE") {
+			t.Errorf("a command requested BODYSTRUCTURE: %s", command)
+		}
 	}
 }

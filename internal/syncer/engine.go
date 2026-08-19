@@ -192,7 +192,10 @@ func (e *Engine) syncAccountLocked(ctx context.Context, accountID int64, p *Prog
 	if err != nil {
 		return result, fmt.Errorf("connecting to %s: %w", account.UpstreamHost, err)
 	}
-	defer client.Close() //nolint:contextcheck // teardown uses its own context by design
+	// Closed through a closure rather than `defer client.Close()`, because the
+	// receiver would be bound now and a reconnect later reassigns the variable
+	// — closing the dead connection and leaking the live one.
+	defer func() { _ = client.Close() }() //nolint:contextcheck // teardown uses its own context by design
 
 	caps := capabilityNames(client.Caps())
 	if err := e.store.SetAccountCapabilities(ctx, accountID, caps); err != nil {
@@ -209,7 +212,8 @@ func (e *Engine) syncAccountLocked(ctx context.Context, accountID int64, p *Prog
 	p.setMailboxTotal(len(boxes))
 
 	var mailboxErrors int
-	var lastMailboxErr error
+	var rootCause error
+	var rootCauseMailbox string
 
 	var keep []string
 	for _, box := range boxes {
@@ -229,6 +233,14 @@ func (e *Engine) syncAccountLocked(ctx context.Context, accountID int64, p *Prog
 		}
 
 		mailboxResult, err := e.syncMailbox(ctx, client, account, box, p)
+
+		// Fold in whatever the mailbox managed before it stopped. Discarding
+		// partial work made a run that stored thousands of messages report
+		// zero, which is worse than useless when diagnosing a failure.
+		result.MessagesNew += mailboxResult.MessagesNew
+		result.BodiesFetched += mailboxResult.BodiesFetched
+		result.BytesFetched += mailboxResult.BytesFetched
+
 		if err != nil {
 			// One mailbox failing must not abandon the others: a single
 			// inaccessible folder should not stop the rest of an account
@@ -239,15 +251,35 @@ func (e *Engine) syncAccountLocked(ctx context.Context, accountID int64, p *Prog
 			e.log.Warn("syncing mailbox failed, continuing with the rest",
 				"account_id", accountID, "mailbox", box.Name, "error", err)
 			mailboxErrors++
-			lastMailboxErr = err
+
+			// Keep the first genuine fault. Later mailboxes may fail only
+			// because this one broke the connection, and reporting the last of
+			// those points at a symptom instead of the cause.
+			if rootCause == nil || !errors.Is(rootCause, upstream.ErrPoisoned) {
+				if rootCause == nil {
+					rootCause, rootCauseMailbox = err, box.Name
+				}
+			}
+
+			// Replace the connection after any mailbox failure.
+			//
+			// Narrower conditions were tried and are wrong: a connection
+			// abandoned at a deadline is marked poisoned, but one closed by the
+			// peer is not, and both leave every later mailbox failing against a
+			// connection that cannot work. Distinguishing them buys nothing —
+			// the cost is one login per failed mailbox, against a run that
+			// otherwise loses every mailbox after the first fault.
+			replacement, connErr := e.reconnect(ctx, account, client)
+			if connErr != nil {
+				return result, fmt.Errorf("reconnecting after %s failed: %w", box.Name, connErr)
+			}
+			client = replacement
+
 			p.mailboxDone()
 			continue
 		}
 
 		result.MailboxesSynced++
-		result.MessagesNew += mailboxResult.MessagesNew
-		result.BodiesFetched += mailboxResult.BodiesFetched
-		result.BytesFetched += mailboxResult.BytesFetched
 		p.mailboxDone()
 	}
 
@@ -255,12 +287,33 @@ func (e *Engine) syncAccountLocked(ctx context.Context, accountID int64, p *Prog
 	// run did nothing and must not be reported as a success — that would hide a
 	// total outage behind a green status.
 	if mailboxErrors > 0 && result.MailboxesSynced == 0 {
-		return result, fmt.Errorf("every mailbox failed to sync (%d of %d), most recently: %w",
-			mailboxErrors, len(boxes), lastMailboxErr)
+		return result, fmt.Errorf("every mailbox failed to sync (%d of %d); root cause was %s: %w",
+			mailboxErrors, len(boxes), rootCauseMailbox, rootCause)
+	}
+	if mailboxErrors > 0 {
+		e.log.Warn("sync finished with some mailboxes failing",
+			"account_id", accountID, "failed", mailboxErrors, "synced", result.MailboxesSynced,
+			"root_cause_mailbox", rootCauseMailbox, "root_cause", rootCause)
 	}
 
 	p.setPhase("done")
 	return result, nil
+}
+
+// reconnect replaces a connection that can no longer be used.
+//
+// Poisoning exists because a connection abandoned mid-response has an unknown
+// amount of unread data still in flight and cannot safely carry another
+// command. Detecting that was right; leaving the run to die with it was not.
+func (e *Engine) reconnect(ctx context.Context, account store.Account, old *upstream.Client) (*upstream.Client, error) {
+	e.log.Info("replacing an unusable upstream connection", "account_id", account.ID)
+	_ = old.Close()
+
+	creds, err := e.credentials(account)
+	if err != nil {
+		return nil, err
+	}
+	return e.connect.Connect(ctx, creds)
 }
 
 func (e *Engine) credentials(account store.Account) (upstream.Account, error) {

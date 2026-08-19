@@ -130,3 +130,37 @@ func ChunkUIDRange(start, end imap.UID, chunk int) []imap.UIDSet {
 	}
 	return sets
 }
+
+// PlanMetadataChunks groups a UID list into fetch-sized sets.
+//
+// Chunking by message count rather than by UID span is what makes the size of
+// each command predictable. A UID range says nothing about how many messages it
+// contains once deletions have left holes — a mailbox numbered to 8000 might
+// hold 200 messages or 8000 — so a span-based chunk can be arbitrarily large or
+// pointlessly small.
+//
+// Bounded commands matter for three reasons: a checkpoint after each one, so an
+// interrupted pass loses at most one chunk; progress the user can see; and a
+// response that completes even when the server is slow.
+func PlanMetadataChunks(uids []imap.UID, size int) []imap.UIDSet {
+	if len(uids) == 0 {
+		return nil
+	}
+	if size < 1 {
+		size = 1
+	}
+
+	var sets []imap.UIDSet
+	for start := 0; start < len(uids); start += size {
+		end := min(start+size, len(uids))
+
+		// AddNum collapses consecutive values, so a contiguous chunk goes on
+		// the wire as "1:500" rather than five hundred comma-separated numbers.
+		var set imap.UIDSet
+		for _, uid := range uids[start:end] {
+			set.AddNum(uid)
+		}
+		sets = append(sets, set)
+	}
+	return sets
+}

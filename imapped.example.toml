@@ -101,7 +101,13 @@ greeting_timeout = "15s"
 io_idle_timeout = "60s"
 
 command_timeout = "30s"
-fetch_metadata_timeout = "180s"
+
+# Ceiling on one metadata FETCH. Generous because a provider's responsiveness
+# can vary enormously under load — the same request measured 70x slower minutes
+# apart on a real server — and a deadline tuned to a fast moment aborts healthy
+# transfers later. Stalls are caught by io_idle_timeout, which is the tighter
+# and more meaningful guard.
+fetch_metadata_timeout = "10m"
 fetch_body_timeout = "60s"
 
 # Kernel-level detection of a black-holed connection. Linux's default is around
@@ -136,8 +142,13 @@ accounts_concurrent = 4
 # raising this invites throttling. Maximum 16.
 connections_per_account = 4
 
-# Chunk size for the metadata pass, so a failure loses one chunk rather than
-# the whole mailbox.
+# How many messages one metadata FETCH covers. Bounded commands give a
+# checkpoint after each chunk, visible progress, and a response that completes
+# even when the server is slow.
+metadata_batch_messages = 500
+
+# Deprecated and ignored: chunking is by message count now, because a UID span
+# says nothing about how many messages it covers once deletions leave holes.
 metadata_batch_uids = 20000
 
 # Body fetches are batched by byte budget first, message count second.
