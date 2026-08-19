@@ -1,6 +1,14 @@
-target
 .git
+.github
+target
+data
+testdata
+*.md
+!README.md
 .env
+.env.*
 .testing-credentials
-.DS_Store
-*.swp
+imapped.toml
+certs
+Makefile
+.golangci.yml

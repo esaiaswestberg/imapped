@@ -1,0 +1,202 @@
+# imapped configuration.
+#
+# Every value here is optional and shown at its built-in default. Environment
+# variables override this file, which overrides the defaults. Each setting's
+# environment variable name is given in the comment above it.
+#
+# Unknown keys are a startup error rather than a silent no-op, so a typo is
+# caught immediately instead of leaving you wondering why a knob had no effect.
+# Run `imapped config show --all` to see the effective value and source of
+# every setting.
+
+# APP_ENV — development | staging | production.
+# Production refuses insecure settings such as a placeholder encryption key.
+app_env = "development"
+
+# APP_BASE_URL — public URL of the web UI, used to build absolute links.
+app_base_url = "http://localhost:8080"
+
+# LOG_LEVEL — debug | info | warn | error
+log_level = "info"
+
+# LOG_FORMAT — json | text. Use text for a readable local terminal.
+log_format = "json"
+
+# ENCRYPTION_MASTER_KEY — encrypts upstream IMAP credentials at rest.
+# Required in production, minimum 32 bytes. Generate with: openssl rand -hex 32
+# encryption_master_key = ""
+
+[imap]
+# IMAP_PLAINTEXT_BIND — where mail clients connect. Empty disables the listener.
+plaintext_bind = "0.0.0.0:1143"
+
+# IMAP_TLS_BIND — implicit-TLS listener. Requires both paths below.
+tls_bind = ""
+# IMAP_TLS_CERT_PATH / IMAP_TLS_KEY_PATH — PEM certificate and private key.
+tls_cert_path = ""
+tls_key_path = ""
+
+# IMAP_IDLE_TIMEOUT — RFC 2177 requires clients to re-issue IDLE within 29
+# minutes, so this should stay just under that.
+idle_timeout = "29m"
+
+# IMAP_COMMAND_TIMEOUT — ceiling on a single client command.
+command_timeout = "5m"
+
+# IMAP_MAX_LITERAL_SIZE — largest APPEND a client may upload.
+max_literal_size = "50MiB"
+
+[http]
+# HTTP_BIND — web UI and operational endpoints.
+bind = "0.0.0.0:8080"
+
+# HTTP_METRICS_BIND — optional second listener, so metrics can stay on an
+# internal interface while the UI is exposed. Empty serves metrics on `bind`.
+metrics_bind = ""
+
+read_timeout = "30s"
+# Zero means no write deadline. Server-sent events for live sync progress are
+# long-lived responses; a write timeout would sever them mid-stream.
+write_timeout = "0s"
+shutdown_timeout = "20s"
+
+[db]
+# DATABASE_URL — required. e.g. postgres://user:pass@host:5432/imapped
+# url = ""
+
+max_conns = 20
+min_conns = 2
+conn_max_lifetime = "1h"
+connect_timeout = "10s"
+statement_timeout = "30s"
+
+# DB_AUTO_MIGRATE — apply pending migrations on startup.
+auto_migrate = true
+
+[storage]
+# OBJECT_STORE_PATH — local blob storage, used when S3 is not configured.
+path = "./data/blob"
+
+# S3-compatible storage (MinIO, Cloudflare R2, AWS). All four of endpoint,
+# bucket, access key and secret must be set together — a partial configuration
+# is a startup error rather than a silent fallback to local disk.
+# The legacy R2_* environment variable names are still honoured.
+# s3_endpoint = ""
+# s3_bucket = ""
+# s3_access_key_id = ""
+# s3_secret_access_key = ""
+s3_region = "auto"
+s3_force_path_style = true
+
+[upstream]
+# Timeouts on the connection to the remote IMAP server being mirrored.
+# None of these may be zero: a zero timeout means "wait forever", which is
+# exactly how a silently-dropped TCP connection once hung a sync for two days.
+dial_timeout = "10s"
+tls_handshake_timeout = "10s"
+greeting_timeout = "15s"
+
+# Inactivity deadline, reset on every read and write. A legitimately slow large
+# message is fine; a connection sending nothing at all is not.
+io_idle_timeout = "60s"
+
+command_timeout = "30s"
+fetch_metadata_timeout = "180s"
+fetch_body_timeout = "60s"
+
+# Kernel-level detection of a black-holed connection. Linux's default is around
+# 11 minutes, which is far too slow to notice a dead peer.
+tcp_user_timeout = "60s"
+tcp_keepalive = "30s"
+
+retry_max_attempts = 6
+retry_base_delay = "1s"
+retry_max_delay = "5m"
+
+# Extensions to use when the server advertises them. QRESYNC reports deletions
+# for free; CONDSTORE lets an unchanged mailbox be skipped in a single command.
+prefer_qresync = true
+prefer_condstore = true
+enable_compress = true
+
+# Disables upstream TLS verification. For self-signed test servers only;
+# refused outright when app_env is production.
+insecure_skip_verify = false
+
+[sync]
+enabled = true
+
+# How often every account is synced in the background.
+interval = "15m"
+
+# How many accounts sync at once.
+accounts_concurrent = 4
+
+# Connections opened per account for parallel body fetching. Most providers cap
+# concurrent connections per user (iCloud around 5, Dovecot defaults to 10), so
+# raising this invites throttling. Maximum 16.
+connections_per_account = 4
+
+# Chunk size for the metadata pass, so a failure loses one chunk rather than
+# the whole mailbox.
+metadata_batch_uids = 20000
+
+# Body fetches are batched by byte budget first, message count second.
+body_batch_bytes = "4MiB"
+body_batch_max_msgs = 50
+
+# Messages larger than this are fetched alone, so one huge attachment cannot
+# stall a batch of small messages behind it.
+body_max_inline_bytes = "32MiB"
+
+# After this many failures a message is parked rather than retried forever.
+# One unfetchable message must never block the rest of a mailbox.
+body_max_attempts = 5
+
+# On servers without QRESYNC, deletions need an explicit scan. This bounds how
+# often that runs.
+deletion_scan_every = 10
+
+# Hard ceiling on a single sync run, so even a logic bug cannot hang forever.
+max_run_duration = "2h"
+
+# Messages left claimed by a process that died are returned to the queue after
+# this long.
+claim_reap_after = "15m"
+
+# How often a running sync proves it is still alive.
+heartbeat_interval = "15s"
+
+[web]
+enabled = true
+session_ttl = "720h"
+
+# Sends session cookies only over HTTPS. Disable only for plaintext localhost.
+secure_cookies = true
+
+# Exposes /debug/pprof. Never enable on a publicly reachable listener.
+pprof = false
+
+[search]
+# Only "postgres" is implemented.
+backend = "postgres"
+
+# Postgres text search configuration; affects stemming and stop words.
+language = "english"
+
+# Body text is truncated to this length before indexing, because to_tsvector
+# errors on inputs producing more than about 1MB of lexemes. The full text is
+# still stored and displayed.
+max_indexed_body_bytes = "900000"
+
+[limits]
+max_message_size = "100MiB"
+default_account_quota = "10GiB"
+login_rate_limit_failures = 5
+login_rate_limit_lockout = "1m"
+
+[bootstrap]
+# Creates a first admin user on startup if no users exist, so a fresh
+# deployment can reach the web UI without shell access. Both must be set.
+# email = "you@example.com"
+# password = ""

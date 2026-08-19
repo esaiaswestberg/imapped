@@ -1,0 +1,40 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose      # an unclosed response body leaks a connection
+    - rowserrcheck   # a missed rows.Err() silently truncates a result set
+    - sqlclosecheck
+    - contextcheck   # a dropped context breaks cancellation, which is how syncs hung
+    - noctx          # every outbound request must be cancellable
+    - errorlint
+    - depguard       # enforces the package layering described in the plan
+
+  settings:
+    depguard:
+      rules:
+        # model is the shared leaf type package; it must not reach upward into
+        # any other internal package, or the dependency graph stops being a DAG.
+        model:
+          files:
+            - "**/internal/model/**"
+          deny:
+            - pkg: github.com/esaiaswestberg/imapped/internal
+              desc: "internal/model must not import other internal packages"
+
+  exclusions:
+    rules:
+      # Test helpers legitimately ignore errors on cleanup paths.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - noctx
+
+formatters:
+  enable:
+    - gofmt
