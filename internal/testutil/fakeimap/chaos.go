@@ -61,7 +61,7 @@ func (l *wrappedListener) Accept() (net.Conn, error) {
 		return l.Accept()
 	}
 
-	var wrapped net.Conn = conn
+	wrapped := net.Conn(conn)
 	if l.chaos.enabled() {
 		wrapped = newChaosConn(wrapped, l.chaos)
 	}

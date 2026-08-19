@@ -52,13 +52,16 @@ func TestReadyzReflectsSubsystemState(t *testing.T) {
 	handler := OperationalHandler(testConfig(), metrics, health)
 
 	// Nothing has reported in yet, so readiness must be false.
-	code, body := get(t, handler, "/readyz")
+	code, _ := get(t, handler, "/readyz")
 	if code != http.StatusServiceUnavailable {
 		t.Errorf("GET /readyz before startup = %d, want 503", code)
 	}
 
+	var body string
+
 	health.Set("db", nil)
 	code, body = get(t, handler, "/readyz")
+	_ = body
 	if code != http.StatusServiceUnavailable {
 		t.Errorf("GET /readyz with one subsystem down = %d, want 503", code)
 	}

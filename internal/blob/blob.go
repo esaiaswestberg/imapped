@@ -99,24 +99,3 @@ type Store interface {
 	// that a repeated sweep is safe.
 	Delete(ctx context.Context, key Key) error
 }
-
-// hashingWriter computes a digest over everything written through it.
-type hashingWriter struct {
-	inner io.Writer
-	hash  interface {
-		io.Writer
-		Sum([]byte) []byte
-	}
-	size int64
-}
-
-func (w *hashingWriter) Write(p []byte) (int, error) {
-	n, err := w.inner.Write(p)
-	if n > 0 {
-		// Hash exactly what was accepted downstream, so a short write cannot
-		// produce a digest for bytes that were never stored.
-		_, _ = w.hash.Write(p[:n])
-		w.size += int64(n)
-	}
-	return n, err
-}

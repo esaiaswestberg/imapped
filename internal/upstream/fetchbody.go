@@ -54,7 +54,9 @@ func (c *Client) FetchBodies(ctx context.Context, uids imap.NumSet, maxSize int6
 
 	return c.withDeadline(ctx, func() error {
 		cmd := c.imap.Fetch(uids, options)
-		defer cmd.Close()
+		// Drains unread response data on every exit path; the error is reported
+		// by the explicit Close below on the success path.
+		defer func() { _ = cmd.Close() }()
 
 		for {
 			msg := cmd.Next()

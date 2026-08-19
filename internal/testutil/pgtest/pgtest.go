@@ -196,7 +196,8 @@ func withAdminConn(ctx context.Context, dsn string, fn func(*pgx.Conn) error) er
 	if err != nil {
 		return err
 	}
-	defer conn.Close(context.Background())
+	// Closing must succeed even when the caller's context has expired.
+	defer conn.Close(context.Background()) //nolint:contextcheck // cleanup must not inherit a cancelled context
 	return fn(conn)
 }
 

@@ -115,12 +115,12 @@ func (c *Connector) Connect(ctx context.Context, account Account) (*Client, erro
 	}
 
 	if err := client.authenticate(ctx, account); err != nil {
-		client.Close()
+		client.Close() //nolint:contextcheck // teardown uses its own context by design
 		return nil, err
 	}
 
 	if err := client.refreshCaps(ctx); err != nil {
-		client.Close()
+		client.Close() //nolint:contextcheck // teardown uses its own context by design
 		return nil, err
 	}
 
@@ -204,6 +204,11 @@ func (c *Client) Poisoned() bool { return c.poisoned }
 
 // Close logs out and closes the connection. A poisoned connection is closed
 // without a LOGOUT, since the protocol state is already unknown.
+//
+// It deliberately uses its own short context rather than a caller's: teardown
+// must still work when the caller's context is precisely what was cancelled.
+//
+//nolint:contextcheck // teardown must not inherit an already-cancelled context
 func (c *Client) Close() error {
 	if c.imap == nil {
 		return c.conn.Close()

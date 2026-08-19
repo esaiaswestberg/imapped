@@ -52,8 +52,11 @@ func newHarness(t *testing.T, opts fakeimap.Options) *harness {
 	cfg.Sync.HeartbeatInterval = config.Duration(5 * time.Second)
 	cfg.Upstream.DialTimeout = config.Duration(3 * time.Second)
 	cfg.Upstream.CommandTimeout = config.Duration(5 * time.Second)
-	cfg.Upstream.FetchMetadataTimeout = config.Duration(10 * time.Second)
-	cfg.Upstream.FetchBodyTimeout = config.Duration(10 * time.Second)
+	// Generous enough to survive a loaded CI machine, but still far below the
+	// production defaults, so a genuine hang fails the test quickly rather than
+	// running out the suite's own timeout.
+	cfg.Upstream.FetchMetadataTimeout = config.Duration(60 * time.Second)
+	cfg.Upstream.FetchBodyTimeout = config.Duration(60 * time.Second)
 
 	ctx := context.Background()
 

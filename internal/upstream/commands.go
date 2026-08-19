@@ -158,10 +158,11 @@ func (c *Client) FetchMetadata(ctx context.Context, uids imap.NumSet, changedSin
 	var out []MessageMeta
 	err := c.withDeadline(ctx, func() error {
 		cmd := c.imap.Fetch(uids, options)
-		// Close drains any unread response data. Leaving even one literal
-		// half-read desynchronises the connection, so this must happen on every
-		// path out of the function, including errors.
-		defer cmd.Close()
+		// Drains any unread response data. Leaving even one literal half-read
+		// desynchronises the connection, so this must happen on every path out
+		// of the function, including errors. The error is reported by the
+		// explicit Close below on the success path.
+		defer func() { _ = cmd.Close() }()
 
 		for {
 			msg := cmd.Next()

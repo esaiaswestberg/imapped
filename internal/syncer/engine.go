@@ -192,7 +192,7 @@ func (e *Engine) syncAccountLocked(ctx context.Context, accountID int64, p *Prog
 	if err != nil {
 		return result, fmt.Errorf("connecting to %s: %w", account.UpstreamHost, err)
 	}
-	defer client.Close()
+	defer client.Close() //nolint:contextcheck // teardown uses its own context by design
 
 	caps := capabilityNames(client.Caps())
 	if err := e.store.SetAccountCapabilities(ctx, accountID, caps); err != nil {

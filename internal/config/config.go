@@ -1,3 +1,8 @@
+// Package config loads and validates the application's settings.
+//
+// Settings come from a TOML file and the environment, with the environment
+// taking precedence, and every value records where it came from so the running
+// configuration can be explained rather than guessed at.
 package config
 
 import "time"

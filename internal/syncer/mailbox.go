@@ -551,7 +551,7 @@ func buildMeta(accountID, mailboxID int64, meta upstream.MessageMeta) store.Mess
 			id := sanitiseText(envelope.MessageID)
 			out.MessageID = &id
 		}
-		if envelope.InReplyTo != nil && len(envelope.InReplyTo) > 0 {
+		if len(envelope.InReplyTo) > 0 {
 			ref := sanitiseText(envelope.InReplyTo[0])
 			out.InReplyTo = &ref
 		}

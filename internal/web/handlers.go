@@ -262,7 +262,11 @@ func (s *Server) handleSyncAccount(w http.ResponseWriter, r *http.Request) {
 //
 // The request must not wait for it: a first sync of a large mailbox takes
 // minutes, and holding an HTTP request open for that would time out somewhere
-// between the browser and any reverse proxy in between.
+// between the browser and any reverse proxy in between. The sync therefore
+// deliberately does not inherit the request context, which is cancelled as
+// soon as the response is written.
+//
+//nolint:contextcheck // background work must outlive the request that started it
 func (s *Server) startSync(accountID int64, trigger string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Sync.MaxRunDuration.Std())

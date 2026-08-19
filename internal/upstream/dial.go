@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"syscall"
@@ -68,7 +69,9 @@ func (c *Connector) socketControl(network, address string, rawConn syscall.RawCo
 }
 
 func isUnsupportedSockopt(err error) bool {
-	return err == unix.ENOPROTOOPT || err == unix.EINVAL || err == unix.ENOTSUP
+	return errors.Is(err, unix.ENOPROTOOPT) ||
+		errors.Is(err, unix.EINVAL) ||
+		errors.Is(err, unix.ENOTSUP)
 }
 
 // tlsConfig builds the client TLS configuration for a host.

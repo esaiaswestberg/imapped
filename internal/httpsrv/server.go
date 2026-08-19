@@ -61,7 +61,10 @@ func New(opts Options) *Server {
 // It binds before returning control, so a port conflict surfaces at startup
 // rather than as a silently missing listener.
 func (s *Server) Serve(ctx context.Context) error {
-	listener, err := net.Listen("tcp", s.http.Addr)
+	// ListenConfig rather than net.Listen so binding respects cancellation; a
+	// slow bind during shutdown should not outlive the context.
+	var lc net.ListenConfig
+	listener, err := lc.Listen(ctx, "tcp", s.http.Addr)
 	if err != nil {
 		return fmt.Errorf("binding %s listener on %s: %w", s.name, s.http.Addr, err)
 	}
@@ -82,6 +85,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdown)
 		defer cancel()
+		// Deliberately detached from ctx: ctx is already cancelled, and
+		// inheriting it would abort the drain instantly, which is the opposite
+		// of a graceful shutdown.
+		//nolint:contextcheck // a fresh context is required to drain after cancellation
 		if err := s.http.Shutdown(shutdownCtx); err != nil {
 			// Drain deadline exceeded: close hard rather than hang forever.
 			s.log.Warn("graceful shutdown timed out, closing connections",

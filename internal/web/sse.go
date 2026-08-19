@@ -120,6 +120,9 @@ func (s *Server) handleSyncEvents(w http.ResponseWriter, r *http.Request) {
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 
+	// The closure reads from the request context on every call; the linter
+	// cannot see that through the indirection.
+	//nolint:contextcheck // r.Context() is used inside
 	send := func() bool {
 		accounts, err := s.store.ListAccountsForUser(r.Context(), user.ID)
 		if err != nil {

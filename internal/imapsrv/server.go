@@ -62,10 +62,10 @@ func (s *Server) Serve(ctx context.Context) error {
 		listener net.Listener
 		err      error
 	)
-	if s.tls != nil {
-		listener, err = tls.Listen("tcp", s.addr, s.tls)
-	} else {
-		listener, err = net.Listen("tcp", s.addr)
+	var lc net.ListenConfig
+	listener, err = lc.Listen(ctx, "tcp", s.addr)
+	if err == nil && s.tls != nil {
+		listener = tls.NewListener(listener, s.tls)
 	}
 	if err != nil {
 		return fmt.Errorf("binding %s listener on %s: %w", s.name, s.addr, err)

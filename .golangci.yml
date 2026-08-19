@@ -16,6 +16,29 @@ linters:
     - depguard       # enforces the package layering described in the plan
 
   settings:
+    errcheck:
+      # Writing to stdout, a tabwriter or a buffer cannot meaningfully fail, and
+      # a deferred Close on a read path has nothing useful to do with an error.
+      # Checking them adds noise that hides the returns that do matter.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (io.Closer).Close
+        - (*database/sql.DB).Close
+        - (*os.File).Close
+        - os.Remove
+        - (*github.com/esaiaswestberg/imapped/internal/upstream.Client).Close
+        - (*github.com/jackc/pgx/v5.Conn).Close
+
+    staticcheck:
+      checks:
+        - all
+        # Being explicit about which embedded field a method comes from is
+        # deliberate in the connection wrappers, where the distinction between
+        # the wrapper and the wrapped connection is the whole point.
+        - "-QF1008"
+
     depguard:
       rules:
         # model is the shared leaf type package; it must not reach upward into
@@ -33,6 +56,11 @@ linters:
       - path: _test\.go
         linters:
           - errcheck
+          - noctx
+      # The test harness binds a throwaway listener; a context there would be
+      # ceremony without benefit.
+      - path: internal/testutil/
+        linters:
           - noctx
 
 formatters:
