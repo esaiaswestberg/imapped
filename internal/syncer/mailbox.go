@@ -171,13 +171,29 @@ func (e *Engine) metadataPass(
 	// Nothing has changed at all: no new messages and no flag updates. One
 	// SELECT settles it, where the previous implementation would still have
 	// issued a FETCH for every message in the mailbox.
+	//
+	// Holding fewer messages than the server reports is treated as proof that
+	// we are not caught up, whatever the modification sequence says. Without
+	// that check a mailbox whose enumeration was interrupted could look
+	// complete — and it did: an interrupted pass left the stored sequence equal
+	// to the server's, so the next run skipped ninety thousand messages. It
+	// also repairs a database already in that state, with no manual step.
 	if condStore &&
 		storedModSeq == int64(selected.HighestModSeq) &&
 		storedUIDNext == int64(selected.UIDNext) &&
 		mailbox.MetadataSyncedThroughUID > 0 {
-		e.log.Debug("mailbox is unchanged since the last sync",
-			"mailbox", mailbox.Name, "highestmodseq", storedModSeq)
-		return 0, nil
+
+		localCount, err := e.store.CountMailboxMessages(ctx, mailbox.ID)
+		if err != nil {
+			return 0, err
+		}
+		if localCount >= int64(selected.NumMessages) {
+			e.log.Debug("mailbox is unchanged since the last sync",
+				"mailbox", mailbox.Name, "highestmodseq", storedModSeq, "messages", localCount)
+			return 0, nil
+		}
+		e.log.Info("mailbox reports as unchanged but holds fewer messages than the server, re-enumerating",
+			"mailbox", mailbox.Name, "local", localCount, "upstream", selected.NumMessages)
 	}
 
 	var newMessages int64

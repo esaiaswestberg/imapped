@@ -64,7 +64,12 @@ func run(ctx context.Context, res *config.Result) error {
 
 	// A run still marked as running at startup belonged to a process that died.
 	// Marking it failed is what turns an invisible hang into a visible one.
-	if n, err := application.Store.MarkOrphanedRuns(ctx, cfg.Sync.MaxRunDuration.Std()); err != nil {
+	// Staleness is measured against the heartbeat, not the maximum run
+	// duration. A run reports liveness every few seconds, so one silent for a
+	// couple of minutes is certainly dead — waiting out the two-hour run limit
+	// left runs from a previous process showing as alive long after they ended.
+	staleAfter := max(5*cfg.Sync.HeartbeatInterval.Std(), 2*time.Minute)
+	if n, err := application.Store.MarkOrphanedRuns(ctx, staleAfter); err != nil {
 		log.Warn("marking orphaned sync runs", "error", err)
 	} else if n > 0 {
 		log.Warn("found sync runs left behind by a previous process", "count", n)

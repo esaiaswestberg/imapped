@@ -137,20 +137,39 @@ type Checkpoint struct {
 // has committed. Advancing it early would mean the server never reports those
 // flag changes again, silently losing them forever.
 func (s *Store) SaveCheckpoint(ctx context.Context, mailboxID int64, c Checkpoint) error {
-	query := `UPDATE mailboxes
-		 SET uidvalidity = $2,
-		     uidnext = $3,
-		     highestmodseq = GREATEST(COALESCE(highestmodseq, 0), $4),
-		     metadata_synced_through_uid = GREATEST(metadata_synced_through_uid, $5),
-		     resync_required = FALSE,
-		     updated_at = now()`
+	// Two distinct statements rather than one with conditional clauses: an
+	// unused placeholder has no inferable type, and Postgres rejects it.
+	var err error
 	if c.FullScanCompleted {
-		query += `, last_full_scan_at = now()`
+		// The pass finished, so the server's sequence numbers now genuinely
+		// describe what is stored.
+		_, err = s.pool.Exec(ctx,
+			`UPDATE mailboxes
+			 SET uidvalidity = $2,
+			     uidnext = $3,
+			     highestmodseq = GREATEST(COALESCE(highestmodseq, 0), $4),
+			     metadata_synced_through_uid = GREATEST(metadata_synced_through_uid, $5),
+			     last_full_scan_at = now(),
+			     resync_required = FALSE,
+			     updated_at = now()
+			 WHERE id = $1`,
+			mailboxID, c.UIDValidity, c.UIDNext, c.HighestModSeq, c.MetadataSyncedThroughUID)
+	} else {
+		// Mid-pass: record only how far enumeration has reached.
+		//
+		// Writing the server's UIDNEXT and HIGHESTMODSEQ here would claim the
+		// mailbox is caught up, when only part of it has been read — and the
+		// next run, finding its stored values equal to the server's, would
+		// conclude there was nothing to do and skip the remainder forever.
+		_, err = s.pool.Exec(ctx,
+			`UPDATE mailboxes
+			 SET uidvalidity = $2,
+			     metadata_synced_through_uid = GREATEST(metadata_synced_through_uid, $3),
+			     resync_required = FALSE,
+			     updated_at = now()
+			 WHERE id = $1`,
+			mailboxID, c.UIDValidity, c.MetadataSyncedThroughUID)
 	}
-	query += ` WHERE id = $1`
-
-	_, err := s.pool.Exec(ctx, query,
-		mailboxID, c.UIDValidity, c.UIDNext, c.HighestModSeq, c.MetadataSyncedThroughUID)
 	if err != nil {
 		return fmt.Errorf("saving checkpoint for mailbox %d: %w", mailboxID, err)
 	}

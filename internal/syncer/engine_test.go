@@ -701,3 +701,117 @@ poll:
 		t.Errorf("stored %d bodies, want %d", stored, messages)
 	}
 }
+
+// An interrupted enumeration must resume, not be mistaken for a completed one.
+//
+// This reproduces a production failure exactly. A pass reached 9,500 of 99,398
+// messages and was killed by a deploy. Because each chunk checkpointed the
+// server's HIGHESTMODSEQ and UIDNEXT — asserting "caught up to here" — the next
+// run compared those against the server, found them equal, concluded the
+// mailbox was unchanged, and skipped the remaining ninety thousand messages
+// permanently.
+func TestInterruptedEnumerationResumesRatherThanBeingSkipped(t *testing.T) {
+	const messages = 600
+
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(messages)}},
+	}, func(c *config.Config) { c.Sync.MetadataBatchMessages = 50 })
+
+	ctx := context.Background()
+
+	// Simulate a run that enumerated part of the mailbox and then died: some
+	// rows, a watermark, and — the critical part — the server's current
+	// sequence numbers already recorded as though the pass had finished.
+	h.sync(t)
+
+	if _, err := h.store.Pool().Exec(ctx,
+		`DELETE FROM mailbox_messages
+		 WHERE id IN (SELECT id FROM mailbox_messages ORDER BY local_uid DESC LIMIT $1)`,
+		messages/2); err != nil {
+		t.Fatalf("removing half the messages: %v", err)
+	}
+
+	var remaining int64
+	if err := h.store.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM mailbox_messages`).Scan(&remaining); err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	t.Logf("simulated an interrupted pass: %d of %d messages recorded, checkpoint intact",
+		remaining, messages)
+
+	// The next run must notice it holds fewer messages than the server reports
+	// and enumerate the rest, rather than trusting the sequence numbers.
+	second := h.sync(t)
+
+	var afterwards int64
+	if err := h.store.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM mailbox_messages`).Scan(&afterwards); err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+
+	if afterwards != messages {
+		t.Errorf("after resuming, %d of %d messages are recorded; the remainder was skipped "+
+			"(the second run reported %d new)", afterwards, messages, second.MessagesNew)
+	}
+}
+
+// A mid-pass checkpoint must not claim the mailbox is caught up.
+func TestMidPassCheckpointDoesNotAdvanceTheSequence(t *testing.T) {
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(10)}},
+	})
+	ctx := context.Background()
+
+	var mailboxID int64
+	if err := h.store.Pool().QueryRow(ctx,
+		`INSERT INTO mailboxes (account_id, name, canonical_name)
+		 VALUES ($1, 'Probe', 'probe') RETURNING id`, h.accountID).Scan(&mailboxID); err != nil {
+		t.Fatalf("creating mailbox: %v", err)
+	}
+
+	// A checkpoint taken partway through records progress but must leave the
+	// sequence numbers alone.
+	if err := h.store.SaveCheckpoint(ctx, mailboxID, store.Checkpoint{
+		UIDValidity: 42, UIDNext: 500, HighestModSeq: 900,
+		MetadataSyncedThroughUID: 100,
+	}); err != nil {
+		t.Fatalf("saving mid-pass checkpoint: %v", err)
+	}
+
+	var uidnext, modseq, watermark *int64
+	if err := h.store.Pool().QueryRow(ctx,
+		`SELECT uidnext, highestmodseq, metadata_synced_through_uid FROM mailboxes WHERE id = $1`,
+		mailboxID).Scan(&uidnext, &modseq, &watermark); err != nil {
+		t.Fatalf("reading mailbox: %v", err)
+	}
+
+	if uidnext != nil {
+		t.Errorf("a mid-pass checkpoint advanced uidnext to %d; the next run would think the "+
+			"mailbox was fully enumerated", *uidnext)
+	}
+	if modseq != nil && *modseq != 0 {
+		t.Errorf("a mid-pass checkpoint advanced highestmodseq to %d", *modseq)
+	}
+	if watermark == nil || *watermark != 100 {
+		t.Errorf("the watermark should still advance mid-pass, got %v", watermark)
+	}
+
+	// Completing the pass is what makes the sequence numbers authoritative.
+	if err := h.store.SaveCheckpoint(ctx, mailboxID, store.Checkpoint{
+		UIDValidity: 42, UIDNext: 500, HighestModSeq: 900,
+		MetadataSyncedThroughUID: 500, FullScanCompleted: true,
+	}); err != nil {
+		t.Fatalf("saving final checkpoint: %v", err)
+	}
+	if err := h.store.Pool().QueryRow(ctx,
+		`SELECT uidnext, highestmodseq FROM mailboxes WHERE id = $1`,
+		mailboxID).Scan(&uidnext, &modseq); err != nil {
+		t.Fatalf("reading mailbox: %v", err)
+	}
+	if uidnext == nil || *uidnext != 500 {
+		t.Errorf("a completed pass should record uidnext, got %v", uidnext)
+	}
+	if modseq == nil || *modseq != 900 {
+		t.Errorf("a completed pass should record highestmodseq, got %v", modseq)
+	}
+}
