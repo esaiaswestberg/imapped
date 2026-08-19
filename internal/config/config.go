@@ -95,7 +95,6 @@ type Upstream struct {
 
 	PreferQResync   bool `toml:"prefer_qresync" env:"UPSTREAM_PREFER_QRESYNC"`
 	PreferCondStore bool `toml:"prefer_condstore" env:"UPSTREAM_PREFER_CONDSTORE"`
-	EnableCompress  bool `toml:"enable_compress" env:"UPSTREAM_ENABLE_COMPRESS"`
 	// InsecureSkipVerify disables upstream TLS certificate verification. Only for
 	// self-signed test servers; Validate refuses it when app_env is production.
 	InsecureSkipVerify bool `toml:"insecure_skip_verify" env:"UPSTREAM_INSECURE_SKIP_VERIFY"`
@@ -215,7 +214,6 @@ func Default() Config {
 
 			PreferQResync:   true,
 			PreferCondStore: true,
-			EnableCompress:  true,
 		},
 		Sync: Sync{
 			Enabled:               true,
