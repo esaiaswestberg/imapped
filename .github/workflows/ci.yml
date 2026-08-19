@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main, go-rewrite]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - run: go vet ./...
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # -shuffle=on surfaces tests that depend on execution order; -race is
+      # non-negotiable for a codebase this concurrent.
+      - name: Unit tests
+        run: go test ./... -race -shuffle=on -coverprofile=cover.out -covermode=atomic
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: cover.out
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: imapped
+          POSTGRES_PASSWORD: imapped
+          POSTGRES_DB: imapped_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U imapped"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Point pgtest at the service container so it skips starting its own.
+      - name: Integration tests
+        env:
+          IMAPPED_TEST_PG_URL: postgres://imapped:imapped@127.0.0.1:5432/imapped_test?sslmode=disable
+        run: go test ./... -race -tags integration
+
+  vulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Building both release platforms on every PR means Docker breakage is
+      # caught here rather than discovered at release time.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

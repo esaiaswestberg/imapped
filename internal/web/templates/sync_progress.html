@@ -1,0 +1,22 @@
+{{define "sync_progress.html"}}
+{{if .Content}}
+  {{range .Content}}
+    <section class="card">
+      <h2>{{.AccountEmail}}</h2>
+      <p>{{.Phase}}{{if .Mailbox}} — {{.Mailbox}}{{end}}</p>
+      <div class="bar"><div class="fill" style="width:{{.Percent}}%"></div></div>
+      <dl class="stats">
+        <div><dt>Mailboxes</dt><dd>{{.MailboxesDone}} / {{.MailboxesTotal}}</dd></div>
+        <div><dt>New messages</dt><dd>{{.MessagesNew}}</dd></div>
+        <div><dt>Downloaded</dt><dd>{{.BodiesFetched}}</dd></div>
+        <div><dt>Transferred</dt><dd>{{formatBytes .BytesFetched}}</dd></div>
+        {{if .PendingBodies}}<div><dt>Remaining</dt><dd>{{.PendingBodies}}</dd></div>{{end}}
+        <div><dt>Elapsed</dt><dd>{{.Elapsed}}</dd></div>
+      </dl>
+      {{if .ETA}}<p class="muted">{{.ETA}}</p>{{end}}
+    </section>
+  {{end}}
+{{else}}
+  <p class="muted">Nothing is syncing right now.</p>
+{{end}}
+{{end}}

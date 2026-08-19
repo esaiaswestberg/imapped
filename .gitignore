@@ -1,7 +1,21 @@
+# Go
+/imapped
+/dist/
+cover.out
+*.test
+
+# Runtime data
+/data/
+/certs/
+
+# Local config and secrets
+/imapped.toml
 .env
+.env.*
 .testing-credentials
 
+# Rust (legacy, removed in a later phase)
+/target/
 
-# Added by cargo
-
-/target
+.DS_Store
+*.swp

@@ -1,0 +1,36 @@
+{{define "layout.html"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{if .Title}}{{.Title}} · {{end}}imapped</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/htmx-sse.js" defer></script>
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{.CSRF}}"}'>
+{{if .User}}
+<header class="topbar">
+  <a class="brand" href="/">imapped</a>
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/accounts">Accounts</a>
+    <a href="/sync">Sync</a>
+    <a href="/search">Search</a>
+    <a href="/runs">History</a>
+    <a href="/settings">Settings</a>
+  </nav>
+  <form method="post" action="/logout" class="signout">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <span class="who">{{.User.Email}}</span>
+    <button type="submit" class="link">Sign out</button>
+  </form>
+</header>
+{{end}}
+<main>
+  {{if .Error}}<div class="banner error">{{.Error}}</div>{{end}}
+  {{if .Flash}}<div class="banner ok">{{.Flash}}</div>{{end}}
+  {{partial .Fragment .}}
+</main>
+</body>
+</html>{{end}}

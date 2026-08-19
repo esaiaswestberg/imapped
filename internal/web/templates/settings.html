@@ -1,0 +1,22 @@
+{{define "settings.html"}}
+<h1>Settings</h1>
+<p class="muted">
+  The effective configuration, and where each value came from. Secrets are shown
+  as a fingerprint rather than a value.
+</p>
+<table class="list settings">
+  <thead><tr><th>Setting</th><th>Value</th><th>Source</th></tr></thead>
+  <tbody>
+  {{range .Content}}
+    <tr class="{{if eq (printf "%s" .Source) "default"}}muted{{end}}">
+      <td><code>{{.TOMLPath}}</code></td>
+      <td>{{if .Value}}<code>{{.Value}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+      <td>
+        {{if eq (printf "%s" .Source) "env"}}<code>{{.EnvVar}}</code>
+        {{else}}{{.Source}}{{end}}
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

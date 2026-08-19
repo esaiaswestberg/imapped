@@ -1,500 +1,197 @@
 # imapped
 
-`imapped` is a Rust IMAP caching proxy and mirror service.
+An IMAP caching proxy. It mirrors your mail accounts into local storage, serves
+them to mail clients over IMAP, and gives you a web interface to manage and
+search it all.
 
-It sits between downstream mail clients and one or more upstream IMAP servers. The server mirrors mailboxes into local storage, serves cached bodies and metadata locally, indexes parsed message content for search, and pushes local mutations back upstream when required.
+Mail stays readable when the upstream server is slow, rate-limited or down, and
+search works over the full text of every message rather than whatever the
+provider chose to index.
 
-## Table of contents
+## What it does
 
-- [Get started](#get-started)
-- [Overview](#overview)
-- [Repository layout](#repository-layout)
-- [Configuration](#configuration)
-  - [Runtime config](#runtime-config)
-  - [Environment variables](#environment-variables)
-  - [Bootstrap authentication](#bootstrap-authentication)
-  - [Upstream IMAP accounts](#upstream-imap-accounts)
-  - [HTTP and metrics](#http-and-metrics)
-  - [TLS certificates](#tls-certificates)
-- [Production deployment](#production-deployment)
-  - [Docker Compose](#docker-compose)
-  - [Portainer](#portainer)
-  - [Operational checklist](#operational-checklist)
-- [Administration](#administration)
-- [Architecture](#architecture)
-- [Protocol surface](#protocol-surface)
-- [Local development](#local-development)
-- [Testing](#testing)
-- [Troubleshooting](#troubleshooting)
+- **Mirrors IMAP accounts** into Postgres (metadata) and disk (message bodies).
+- **Serves mail clients** over IMAP on ports 143/993, so Thunderbird and friends
+  talk to imapped instead of to the provider.
+- **Full-text search** over subjects, correspondents and complete message text.
+- **A web interface** for adding accounts, watching syncs, browsing and
+  searching, with live progress as mail arrives.
+- **Pushes changes back**: marking a message read locally reaches the upstream
+  server.
 
-## Get started
+## Getting started
 
-This is the fastest path to a working production-style deployment.
+```bash
+cp .env.example .env          # fill in the two generated secrets
+docker compose -f compose.prod.yaml up -d
+```
 
-1. Prepare a production environment file.
+Then open the web interface, sign in with the bootstrap account, and add a mail
+account. Syncing starts immediately.
 
-   Start from [`.env.example`](./.env.example) and create something like `.env.production`. At minimum, set:
+For local development:
 
-   - `APP_ENV=production`
-   - `APP_BASE_URL=https://mail.example.com`
-   - `ENCRYPTION_MASTER_KEY=<random-secret>`
-   - `DATABASE_URL=<production-postgres-url>`
-   - `REDIS_URL=<production-redis-url>`
-   - `R2_ENDPOINT=<s3-compatible-endpoint>`
-   - `R2_BUCKET=<bucket-name>`
-   - `R2_ACCESS_KEY_ID=<access-key>`
-   - `R2_SECRET_ACCESS_KEY=<secret-key>`
-   - `IMAP_TLS_CERT_PATH=/certs/imap.crt`
-   - `IMAP_TLS_KEY_PATH=/certs/imap.key`
-   - `OBJECT_STORE_PATH=/app/data/blob`
-   - `SEARCH_INDEX_PATH=/app/data/search`
+```bash
+docker compose up --build
+```
 
-2. Mount a TLS certificate and key.
+which brings up the app on <http://localhost:8080> with an `admin@example.com`
+account, password `development-password`.
 
-   The application expects PEM files. Use a CA-issued certificate for a public deployment, or a self-signed certificate if your clients trust it.
+### Without Docker
 
-3. Start the stack.
+```bash
+go build -o imapped ./cmd/imapped
+export DATABASE_URL="postgres://user:pass@localhost:5432/imapped"
+export ENCRYPTION_MASTER_KEY="$(openssl rand -hex 32)"
 
-   The repository includes [`docker-compose.prod.yml`](./docker-compose.prod.yml). It runs the app container plus PostgreSQL and Redis, while assuming an external S3-compatible object store.
-
-   ```bash
-   docker compose -f docker-compose.prod.yml up -d
-   ```
-
-4. Run migrations.
-
-   ```bash
-   docker compose -f docker-compose.prod.yml run --rm imap-cache run-migrations
-   ```
-
-5. Create a local application user.
-
-   ```bash
-   docker compose -f docker-compose.prod.yml run --rm imap-cache create-user \
-     --username-email user@example.test \
-     --password 'change-me'
-   ```
-
-6. Add an upstream IMAP account.
-
-   Upstream settings are per account, not global.
-
-   ```bash
-   docker compose -f docker-compose.prod.yml run --rm imap-cache add-account \
-     --user-email user@example.test \
-     --display-name "Primary Mail" \
-     --email-address user@example.test \
-     --upstream-host imap.provider.example \
-     --upstream-port 993 \
-     --upstream-tls-mode tls \
-     --upstream-auth-method login \
-     --upstream-username user@example.test \
-     --upstream-secret 'upstream-password'
-   ```
-
-7. Point your mail client at the IMAP ports exposed by the stack.
-
-   The service listens internally on `1143` for plaintext IMAP and `1993` for IMAPS/TLS in the default compose file.
-
-## Overview
-
-`imapped` is a production-shaped IMAP mirror built as a Rust workspace with separate crates for protocol handling, upstream access, sync, storage, search, coordination, and admin workflows.
-
-The runtime behavior is:
-
-1. A mail client connects to the IMAP frontend.
-2. The frontend authenticates the session and routes commands through repository-backed state.
-3. Reads are served from PostgreSQL metadata and cached object storage where possible.
-4. Cache misses and sync gaps are filled from the upstream IMAP server configured for that account.
-5. Mutations are written locally first, then replayed upstream through the mutation queue.
-6. Redis and the in-process event hub fan mailbox changes out to active sessions and background workers.
-
-There is currently no browser-based web UI. The HTTP listener is for health and metrics style endpoints, not end-user mail access.
-
-## Repository layout
-
-This repository is a Rust workspace. The main pieces are:
-
-- `crates/core/` for shared domain types, errors, and security helpers.
-- `crates/config/` for configuration loading.
-- `crates/auth/` for authentication and account bootstrap logic.
-- `crates/db/` for SQLx repositories and migrations.
-- `crates/imap-server/` for the IMAP frontend and HTTP endpoints.
-- `crates/upstream/` for the upstream IMAP client.
-- `crates/sync/` for mailbox synchronization and mutation replay.
-- `crates/storage/` for object storage abstractions and backends.
-- `crates/search/` for Tantivy indexing and search.
-- `crates/notifications/` for mailbox events and Redis relay hooks.
-- `crates/test-support/` for shared live-test helpers.
-- `src/` for the top-level binary and admin wiring.
+./imapped migrate
+./imapped user create --email you@example.com
+./imapped run
+```
 
 ## Configuration
 
-Configuration can be supplied either through environment variables or a TOML file.
-
-- Use `--config /path/to/config.toml` to point the binary at a config file.
-- Alternatively set `APP_CONFIG_PATH=/path/to/config.toml`.
-- See [`config.example.toml`](./config.example.toml) for a config-file example.
-- See [`.env.example`](./.env.example) for an environment-variable example.
-
-### Runtime config
-
-The important runtime settings include:
-
-- listener bind addresses for IMAP, HTTP, and metrics
-- `DATABASE_URL` for PostgreSQL
-- `REDIS_URL` for Redis fanout and coordination
-- `R2_*` values for the external S3-compatible object store endpoint and credentials
-- `IMAP_TLS_CERT_PATH` and `IMAP_TLS_KEY_PATH` for TLS
-- `ENCRYPTION_MASTER_KEY` for secret handling
-
-`APP_BASE_URL` is not a web UI. The current HTTP server exposes operational endpoints, not a browser application for mail clients.
-
-`ENCRYPTION_MASTER_KEY` is a plain passphrase string. Do not treat it as base64 or base32 unless you are deliberately encoding a string yourself. Keep it stable across restarts.
-
-### Environment variables
-
-The production compose file and `.env.example` configure the application via the following key groups. Unless otherwise specified, all settings are Optional and will fall back to their defaults.
-
-**Core Application Settings:**
-- `APP_ENV`: (Default: `development`, Type: String) Sets the application environment. Controls features like the format of logging output (e.g. `production` enables JSON logs).
-- `APP_BASE_URL`: (Default: `http://localhost:8080`, Type: URL) The base URL for the application. Primarily used to construct self-referential links.
-- `LOG_LEVEL`: (Default: `debug`, Type: String) Sets the verbosity of application logs. Valid values include `trace`, `debug`, `info`, `warn`, and `error`.
-- `ENCRYPTION_MASTER_KEY`: (Default: `change-me-32-bytes-minimum`, Type: String) The master encryption key used to protect sensitive data at rest. Must remain stable across restarts to avoid data loss. **Required for production deployments.**
-
-**Network Listeners:**
-- `IMAP_PLAINTEXT_BIND`: (Default: `0.0.0.0:1143`, Type: Socket Address) The interface and port to bind for the plaintext IMAP listener.
-- `IMAP_TLS_BIND`: (Default: `0.0.0.0:1993`, Type: Socket Address) The interface and port to bind for the TLS/SSL IMAP listener.
-- `IMAP_TLS_CERT_PATH`: (Default: `/certs/imap.crt`, Type: Path) The path to the PEM-encoded TLS certificate used for IMAP connections. Required if TLS is enabled.
-- `IMAP_TLS_KEY_PATH`: (Default: `/certs/imap.key`, Type: Path) The path to the private key for the IMAP TLS certificate. Required if TLS is enabled.
-- `HTTP_BIND`: (Default: `0.0.0.0:8080`, Type: Socket Address) The interface and port to bind the administrative and health HTTP server.
-- `METRICS_BIND`: (Default: None, Type: Socket Address) The interface and port to bind a dedicated Prometheus metrics endpoint.
-
-**Datastore Configurations:**
-- `DATABASE_URL`: (Default: None, Type: Connection String) The connection string for the PostgreSQL database where metadata is stored. **Required.**
-- `REDIS_URL`: (Default: None, Type: Connection String) The connection string for Redis, used for pub/sub notifications and synchronization.
-- `OBJECT_STORE_PATH`: (Default: `./data/blob`, Type: Path) The path to a local directory for filesystem-based object storage, typically used for local development.
-- `SEARCH_INDEX_PATH`: (Default: `./data/search`, Type: Path) The path to a local directory where the Tantivy full-text search index will be stored.
-
-**S3-Compatible Object Storage:**
-- `R2_ENDPOINT`: (Default: None, Type: URL) The URL endpoint for the S3-compatible object store (e.g., Cloudflare R2, MinIO).
-- `R2_BUCKET`: (Default: None, Type: String) The bucket name within the S3-compatible object store.
-- `R2_ACCESS_KEY_ID`: (Default: None, Type: String) The access key ID for authenticating with the object store.
-- `R2_SECRET_ACCESS_KEY`: (Default: None, Type: String) The secret access key for authenticating with the object store.
-- `R2_REGION`: (Default: `auto`, Type: String) The region to use for the S3-compatible object store connection.
-
-**Safety Limits and Tuning:**
-- `MAX_LITERAL_SIZE_BYTES`: (Default: `52428800` (50 MB), Type: Integer) The maximum size of an IMAP literal command payload.
-- `MAX_MESSAGE_SIZE_BYTES`: (Default: `104857600` (100 MB), Type: Integer) The maximum size of an individual email message.
-- `DEFAULT_ACCOUNT_QUOTA_BYTES`: (Default: `10737418240` (10 GB), Type: Integer) The default storage quota allocated to new IMAP accounts.
-- `SYNC_CONCURRENCY`: (Default: `4`, Type: Integer) The maximum number of concurrent synchronization tasks to run.
-- `UPSTREAM_CONNECTION_LIMIT_PER_ACCOUNT`: (Default: `2`, Type: Integer) The maximum number of simultaneous IMAP connections established per upstream account.
-- `LOGIN_RATE_LIMIT_FAILURES`: (Default: `5`, Type: Integer) The number of failed login attempts allowed before locking out an IP.
-- `LOGIN_RATE_LIMIT_LOCKOUT_SECONDS`: (Default: `60`, Type: Integer) The duration in seconds that an IP is locked out after exceeding the login failure limit.
-- `PERIODIC_SYNC_INTERVAL_SECONDS`: (Default: `3600`, Type: Integer) The interval in seconds at which the background sync worker will check and synchronize all configured accounts.
-
-### Bootstrap authentication
-
-The service supports a bootstrap IMAP login path. This is useful for local development, quick smoke tests, or a controlled bootstrap user. For normal production use, you should create application users in the database with the admin CLI instead.
-
-To enable the bootstrap account, configure the username and exactly one password option:
-
-- `BOOTSTRAP_IMAP_USERNAME`: (Default: None, Type: String) The username for the bootstrap administrative user. Optional.
-- `BOOTSTRAP_IMAP_PASSWORD`: (Default: None, Type: String) The plain-text password for the bootstrap user. Optional.
-- `BOOTSTRAP_IMAP_PASSWORD_HASH`: (Default: None, Type: String) A pre-hashed password for the bootstrap user, encoded using the **Argon2** hashing algorithm. Optional.
-
-### Upstream IMAP accounts
-
-Upstream IMAP configuration is stored per account in the database. There is no separate global upstream host setting.
-
-The `add-account` command stores:
-
-- upstream host
-- upstream port
-- TLS mode
-- authentication method
-- upstream username
-- upstream secret
-
-Those values are then used by the upstream client when the account syncs or when you run `test-upstream` or `force-sync`.
-
-### HTTP and metrics
-
-The HTTP and metrics bind settings are optional. They do not help downstream IMAP clients connect.
-
-- Use `HTTP_BIND` if you want the operational HTTP listener exposed.
-- Use `METRICS_BIND` if you want a separate metrics listener.
-
-If you do not need them, leave them unset and do not expose those ports.
-
-### TLS certificates
-
-The IMAP listener expects a certificate and private key on disk, mounted into the container at the paths referenced by `IMAP_TLS_CERT_PATH` and `IMAP_TLS_KEY_PATH`.
-
-- Certificates should be PEM encoded.
-- The key should be the matching private key for that certificate.
-- For a public deployment, a CA-issued certificate such as one from Let's Encrypt is recommended.
-- For a private deployment, a self-signed certificate is fine if your clients trust the issuing CA or the certificate directly.
-
-## Production deployment
-
-The recommended production shape is:
-
-- one Docker container for `imapped`
-- PostgreSQL as the canonical metadata store
-- Redis for pub/sub, coordination, and short-lived cache/workers
-- an external S3-compatible object store for raw message and MIME blobs
-- TLS certificates mounted into the container for IMAP STARTTLS and implicit TLS
-
-If you are using MinIO locally, treat that as a development or compatibility substitute, not as the production object store.
-
-The release workflow publishes the Docker image to `ghcr.io/esaiaswestberg/imapped` with both the release tag and `latest`. Production Compose should normally pull `latest`; use a tag-specific image if you want to pin a deployment to a particular release.
-
-### Docker Compose
-
-The repository includes [`docker-compose.prod.yml`](./docker-compose.prod.yml). It pulls `ghcr.io/esaiaswestberg/imapped:latest`, provisions PostgreSQL and Redis locally, and leaves the object store external and S3-compatible.
-
-Start it with:
+Configuration comes from a TOML file and the environment, with the environment
+taking precedence. Every setting is documented in
+[`imapped.example.toml`](imapped.example.toml).
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d
+./imapped config check          # validate and exit non-zero if unusable
+./imapped config show --all     # every value, and where it came from
 ```
 
-Run migrations before opening the service to clients:
+`config show` reports the source of each value — a built-in default, the file,
+or a specific environment variable — which turns "why did my setting not take
+effect" into a glance. The same table is on the web interface's settings page.
+Unknown keys in the file are a startup error rather than a silent no-op.
+
+Two settings need attention before production:
+
+- `ENCRYPTION_MASTER_KEY` protects upstream credentials at rest. Generate one
+  with `openssl rand -hex 32`. **Changing it makes every stored credential
+  unreadable**, and accounts will need their passwords re-entered.
+- `DATABASE_URL` is required and has no default.
+
+## Commands
+
+Almost everything is done through the web interface. The CLI covers what
+genuinely needs a shell:
+
+| Command | Purpose |
+|---|---|
+| `imapped run` | Run the server |
+| `imapped migrate` | Apply database migrations |
+| `imapped migrate status` | Show which migrations have been applied |
+| `imapped user create --email …` | Create a user (needed once, to sign in) |
+| `imapped user set-password --email …` | Change a password |
+| `imapped config check` | Validate configuration |
+| `imapped config show` | Show effective configuration and its sources |
+| `imapped version` | Print version information |
+
+No command performs sync work in its own process; anything that would trigger
+work goes through the running server.
+
+## Connecting a mail client
+
+Point the client at the host running imapped, port 143 (STARTTLS) or 993
+(TLS), and sign in with **your imapped credentials** — not the upstream mail
+account's. The upstream password stays encrypted in the database and is never
+handed out.
+
+Mirrored mailboxes are read-only apart from flags: marking messages read or
+flagged works and is pushed upstream. Creating mailboxes, moving and deleting
+messages are refused rather than silently accepted, so a client never believes
+a change succeeded when it did not.
+
+`SORT` and `THREAD` are not advertised, so clients sort and thread locally as
+they do against most IMAP servers.
+
+## How syncing works
+
+Each mailbox syncs in two passes.
+
+The **metadata pass** enumerates messages in one command per chunk rather than
+one per message. Where the server supports `CONDSTORE`, flag changes come back
+through `CHANGEDSINCE` and a mailbox with nothing new is settled by `SELECT`
+alone — a single command.
+
+The **body pass** then downloads whatever the first pass recorded as missing,
+batched by byte budget across several connections, newest first so recent mail
+appears while an old archive is still transferring. Each message carries its own
+download state, so an interrupted sync resumes without re-downloading anything.
+
+Bodies are content-addressed, so a message appearing in several mailboxes is
+stored once.
+
+**Cost, for a mailbox of 8,300 messages:**
+
+| | commands |
+|---|---|
+| First sync | ~1 for metadata, plus one per body batch |
+| Nothing changed | 1 |
+| 20 new messages | 3 |
+
+Every network operation is bounded by a deadline: dial, TLS handshake, greeting,
+each command, and an inactivity window on the connection itself. `TCP_USER_TIMEOUT`
+makes the kernel surface a black-holed peer in seconds rather than the ~11
+minutes Linux defaults to. A sync that stops making progress fails and is
+reported; it cannot hang indefinitely.
+
+Only one sync per account runs at a time, held by a Postgres advisory lock on a
+dedicated session. If the process dies the database releases the lock
+immediately — there is no lease to expire and nothing to clear by hand.
+
+## Operating it
+
+- `GET /healthz` — liveness. Deliberately independent of the database, so an
+  outage removes the instance from rotation rather than getting it restarted.
+- `GET /readyz` — readiness, naming any failing subsystem.
+- `GET /metrics` — Prometheus metrics. Set `HTTP_METRICS_BIND` to serve these on
+  a separate, internal listener.
+
+The **History** page lists every sync attempt. A run whose heartbeat stopped
+while still marked running belonged to a process that died, and is shown as
+stalled.
+
+## Development
 
 ```bash
-docker compose -f docker-compose.prod.yml run --rm imap-cache run-migrations
+make test              # unit tests, hermetic, no Docker needed
+make test-integration  # integration tests against a throwaway Postgres
+make lint
 ```
 
-Bootstrap users and accounts with the same compose file:
+Integration tests are behind the `integration` build tag so the default suite
+stays fast. They use a throwaway Postgres, cloning a migrated template database
+per test; set `IMAPPED_TEST_PG_URL` to reuse a server you already have running.
 
-```bash
-docker compose -f docker-compose.prod.yml run --rm imap-cache create-user \
-  --username-email user@example.test \
-  --password 'change-me'
+`internal/testutil/fakeimap` runs a real IMAP server for tests, with hooks to
+make it misbehave in ways a correct server cannot — hanging mid-command,
+dropping the connection, trickling bytes. Those are the regression tests for the
+timeout handling, and its command recorder is what keeps the sync from silently
+regressing to one request per message.
 
-docker compose -f docker-compose.prod.yml run --rm imap-cache add-account \
-  --user-email user@example.test \
-  --display-name "Primary Mail" \
-  --email-address user@example.test \
-  --upstream-host imap.provider.example \
-  --upstream-port 993 \
-  --upstream-tls-mode tls \
-  --upstream-auth-method login \
-  --upstream-username user@example.test \
-  --upstream-secret 'upstream-password'
+### Layout
+
+```
+cmd/imapped        entry point
+internal/
+  app              wiring
+  blob             content-addressed body storage
+  cli              command tree
+  config           settings, layering, validation
+  crypto           password hashing, credential sealing
+  db               connection pool, migrations
+  imapsrv          IMAP server for mail clients
+  mailstore        MIME parsing and ingest
+  search           full-text search
+  store            database queries
+  syncer           the mirroring engine
+  upstream         IMAP client for the mirrored server
+  web              browser interface
 ```
 
-Notes:
+## Licence
 
-- The container listens on `1143` and `1993` internally by default. Port mapping exposes standard IMAP ports on the host.
-- The data volume holds the search index and other runtime data. Keep it persistent.
-- The compose file is intentionally small and expects the S3-compatible object store to be provided externally.
-- Do not set `command: ["run"]` in Portainer. The image already starts the binary by default, and overriding the command with `run` makes Docker try to execute a nonexistent `run` program.
-
-If you want to build locally for testing or inspection, you can still do:
-
-```bash
-docker build -t imapped:latest .
-```
-
-### Portainer
-
-Portainer works well with the same compose file, with one important caveat: do not add an explicit `command: ["run"]` override.
-
-Use the image entrypoint as shipped by the container. If you want to be explicit for some reason, set an entrypoint to the binary path and then pass `run`, but that is not required for the normal deployment.
-
-### Operational checklist
-
-- `APP_ENV=production`
-- `DATABASE_URL` points to production PostgreSQL
-- `REDIS_URL` points to production Redis
-- S3-compatible object store endpoint, bucket, and credentials are valid
-- TLS certificate and key are mounted read-only
-- persistent volume exists for local cache and search index data
-- migrations have been run successfully
-- at least one administrative user has been created
-- one or more upstream mail accounts have been added
-
-When those items are in place, the container is ready for normal IMAP client traffic.
-
-## Administration
-
-The binary exposes admin subcommands for common operational tasks.
-
-Examples:
-
-```bash
-cargo run --bin imap-cache-rs -- --help
-cargo run --bin imap-cache-rs -- run-migrations
-cargo run --bin imap-cache-rs -- create-user --username-email user@example.test --password 'change-me'
-cargo run --bin imap-cache-rs -- add-account \
-  --user-email user@example.test \
-  --display-name "Primary Mail" \
-  --email-address user@example.test \
-  --upstream-host imap.provider.example \
-  --upstream-port 993 \
-  --upstream-tls-mode tls \
-  --upstream-auth-method login \
-  --upstream-username user@example.test \
-  --upstream-secret 'upstream-password'
-cargo run --bin imap-cache-rs -- list-accounts --user-email user@example.test
-cargo run --bin imap-cache-rs -- test-upstream --account-email user@example.test
-```
-
-Useful commands:
-
-- `create-user` creates an application user.
-- `add-account` creates a mail account and stores the upstream IMAP connection details for that account.
-- `test-upstream` verifies that a saved account can reach and authenticate with its upstream server.
-- `force-sync` triggers a sync for a specific account.
-- `list-accounts`, `list-mailboxes`, and `show-sync-status` help with day-to-day operations.
-
-## Architecture
-
-The codebase is split into focused crates so the production boundaries are visible in code:
-
-- `crates/imap-server/` owns the IMAP frontend and HTTP endpoints.
-- `crates/upstream/` owns the upstream IMAP client.
-- `crates/sync/` owns mailbox synchronization, checkpointing, and mutation replay.
-- `crates/db/` owns SQLx repositories and schema migrations.
-- `crates/storage/` owns R2/S3, filesystem, and memory object stores.
-- `crates/search/` owns Tantivy indexing and search.
-- `crates/auth/` owns local authentication and account bootstrap logic.
-- `crates/notifications/` owns mailbox events and Redis relay hooks.
-- `crates/core/` carries shared domain types, errors, and security helpers.
-- `crates/config/` owns configuration loading.
-- `crates/test-support/` holds live-test helpers and credentials parsing.
-
-The service flow is:
-
-1. A mail client connects to the IMAP frontend.
-2. The frontend authenticates the session and routes commands through repository-backed state.
-3. Reads are served from PostgreSQL metadata and cached object storage where possible.
-4. Cache misses and sync gaps are filled from the upstream IMAP server configured for that account.
-5. Mutations are written locally first, then replayed upstream through the mutation queue.
-6. Redis and the in-process event hub fan mailbox changes out to active sessions and background workers.
-
-Storage is split by responsibility:
-
-- PostgreSQL stores canonical metadata, mailbox state, sync checkpoints, pending mutations, quotas, and audit records.
-- Object storage stores raw RFC822 blobs, MIME body blobs, attachment data, and other large cached objects.
-- Tantivy stores searchable content derived from parsed MIME bodies and headers.
-- Redis supports pub/sub fanout, worker coordination, and short-lived shared state.
-
-## Protocol surface
-
-The IMAP frontend advertises and implements the current production command set.
-
-### Advertised capabilities
-
-- `IMAP4rev1`
-- `STARTTLS`
-- `AUTH=PLAIN`
-- `AUTH=XOAUTH2`
-- `UIDPLUS`
-- `NAMESPACE`
-- `SPECIAL-USE`
-- `LIST-STATUS`
-- `IDLE`
-- `CONDSTORE`
-- `ENABLE`
-- `ID`
-- `ESEARCH`
-- `MOVE`
-- `SORT`
-- `THREAD=REFERENCES`
-- `THREAD=ORDEREDSUBJECT`
-- `UNSELECT`
-
-Capability advertisement is state-dependent. For example, `STARTTLS` is only advertised while the connection is still in cleartext, and the authenticated capability set is larger than the unauthenticated one.
-
-### Implemented commands
-
-- `CAPABILITY`
-- `NOOP`
-- `LOGOUT`
-- `STARTTLS`
-- `LOGIN`
-- `AUTHENTICATE`
-- `SELECT`
-- `EXAMINE`
-- `CREATE`
-- `DELETE`
-- `RENAME`
-- `SUBSCRIBE`
-- `UNSUBSCRIBE`
-- `LIST`
-- `LSUB`
-- `STATUS`
-- `APPEND`
-- `CHECK`
-- `CLOSE`
-- `EXPUNGE`
-- `SEARCH`
-- `FETCH`
-- `STORE`
-- `COPY`
-- `MOVE`
-- `UID`
-- `IDLE`
-- `UNSELECT`
-- `NAMESPACE`
-- `ENABLE`
-- `CONDSTORE`
-- `ID`
-- `THREAD`
-- `LIST-STATUS`
-
-Implementation notes:
-
-- `FETCH` supports raw RFC822 reads, partial fetches, and common metadata items.
-- `SEARCH` uses PostgreSQL for structured fields and Tantivy for text-oriented queries.
-- The sync engine preserves raw message bytes and uses content-addressed object storage for large payloads.
-- Flags are reconciled from upstream state so local mailbox metadata does not drift silently.
-- Live upstream tests use real credentials from `.testing-credentials` and are serialized so they do not race each other across test binaries.
-
-## Local development
-
-The repository includes a Docker-based local stack with PostgreSQL, Redis, MinIO-compatible storage, and an optional Dovecot upstream for integration tests.
-
-```bash
-make up
-```
-
-Run tests:
-
-```bash
-make test
-```
-
-Bring up the optional test upstream:
-
-```bash
-make up-test
-```
-
-Shut the stack down:
-
-```bash
-make down
-```
-
-## Testing
-
-The test suite includes unit, integration, protocol, sync, storage, search, metrics, and live-upstream coverage.
-
-Live upstream tests read credentials from `.testing-credentials` in the repository root and use the listed IMAP SSL/TLS endpoint plus username/password. Those tests are serialized with a shared file lock so they can run safely across multiple cargo test binaries.
-
-Run the full suite with:
-
-```bash
-cargo test
-```
-
-## Troubleshooting
-
-- If `add-account` says `user not found`, create the application user first with `create-user`, then rerun `add-account` with the same email address.
-- If Portainer shows `exec: "run": executable file not found in $PATH`, remove the `command: ["run"]` override from the compose service.
-- If downstream clients cannot connect, check the IMAP TLS certificate paths, port mappings, and whether the IMAP ports are exposed on the host.
-- If sync or storage fails after restart, confirm that `ENCRYPTION_MASTER_KEY` has not changed and that the PostgreSQL and object storage volumes are still intact.
+See [LICENSE](LICENSE).

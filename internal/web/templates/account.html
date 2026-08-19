@@ -1,0 +1,84 @@
+{{define "account.html"}}
+{{$a := .Content.Account}}
+<h1>{{$a.EmailAddress}}</h1>
+<p class="muted">{{$a.UpstreamHost}}:{{$a.UpstreamPort}} · {{$a.UpstreamTLSMode}}</p>
+
+{{if eq $a.AuthState "auth_failed"}}
+  <div class="banner error">
+    Signing in to the mail server failed. Syncing will not be retried until the
+    credentials are corrected — repeatedly retrying a rejected password risks the
+    provider locking the account.
+    {{if $a.LastSyncError}}<br><small>{{$a.LastSyncError}}</small>{{end}}
+  </div>
+{{else if $a.LastSyncError}}
+  <div class="banner warn">Last sync reported: {{$a.LastSyncError}}</div>
+{{end}}
+
+{{if .Content.Running}}
+  <div class="card">
+    <h2>Syncing now</h2>
+    <p>{{.Content.Progress.Phase}}</p>
+    <div class="bar"><div class="fill" style="width:{{.Content.Progress.Percent}}%"></div></div>
+    <p class="muted">{{.Content.Progress.BodiesFetched}} downloaded · {{.Content.Progress.ETA}}</p>
+    <p><a href="/sync">Watch live progress</a></p>
+  </div>
+{{end}}
+
+<div class="actions">
+  <form method="post" action="/accounts/{{$a.ID}}/sync">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    <button type="submit" class="primary">Sync now</button>
+  </form>
+  {{if $a.SyncPaused}}
+  <form method="post" action="/accounts/{{$a.ID}}/resume">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    <button type="submit">Resume syncing</button>
+  </form>
+  {{else}}
+  <form method="post" action="/accounts/{{$a.ID}}/pause">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    <button type="submit">Pause syncing</button>
+  </form>
+  {{end}}
+  <form method="post" action="/accounts/{{$a.ID}}/delete"
+        onsubmit="return confirm('Delete this account and every message mirrored from it?')">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    <button type="submit" class="danger">Delete</button>
+  </form>
+</div>
+
+<h2>Mailboxes</h2>
+<table class="list">
+  <thead><tr><th>Name</th><th>Messages</th><th>Unread</th><th>Last scanned</th></tr></thead>
+  <tbody>
+  {{range .Content.Mailboxes}}
+    <tr>
+      <td><a href="/mailboxes/{{.ID}}">{{.Name}}</a></td>
+      <td>{{.ExistsCount}}</td>
+      <td>{{.UnseenCount}}</td>
+      <td class="muted">{{formatAgo .LastFullScanAt}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="4" class="muted">No mailboxes yet — run a sync.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+
+<h2>Recent syncs</h2>
+<table class="list">
+  <thead><tr><th>Started</th><th>Status</th><th>New</th><th>Downloaded</th><th>Commands</th></tr></thead>
+  <tbody>
+  {{range .Content.Runs}}
+    <tr>
+      <td class="muted">{{formatAgo .StartedAt}}</td>
+      <td>{{.Status}}</td>
+      <td>{{.MessagesNew}}</td>
+      <td>{{.BodiesFetched}}</td>
+      <td>{{.CommandsIssued}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="muted">No syncs recorded yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

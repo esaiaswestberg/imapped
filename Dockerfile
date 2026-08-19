@@ -1,35 +1,42 @@
-FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
-ARG TARGETPLATFORM
-COPY --from=tonistiigi/xx:1.4.0 / /
+# Cross-compilation happens natively on the build host: the builder always runs
+# on $BUILDPLATFORM and targets $TARGETPLATFORM via GOOS/GOARCH. No QEMU is
+# involved, so an arm64 image builds at native speed on an amd64 runner.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 
-# Install clang and lld for cross-compilation
-RUN apt-get update && apt-get install -y clang lld
+WORKDIR /src
 
-# Install target libc6-dev
-RUN xx-apt-get install -y gcc libc6-dev
+# Dependencies are their own layer so source edits do not re-download the module
+# graph. The cache mount keeps them across builds too.
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
-WORKDIR /app
+COPY . .
 
-COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
-COPY src ./src
-COPY migrations ./migrations
-COPY tests ./tests
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+ARG COMMIT=none
 
-# Use xx-cargo to automatically set target triple based on TARGETPLATFORM
-RUN xx-cargo build --release
+# CGO is off because every dependency is pure Go: pgx speaks the wire protocol
+# directly and TLS comes from crypto/tls. That is what allows a static binary on
+# a distroless base with no libc at all.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath \
+      -ldflags="-s -w -X github.com/esaiaswestberg/imapped/internal/cli.Version=${VERSION} -X github.com/esaiaswestberg/imapped/internal/cli.Commit=${COMMIT}" \
+      -o /out/imapped ./cmd/imapped
 
-# Copy to a predictable location
-RUN cp target/$(xx-cargo --print-target-triple)/release/imap-cache-rs ./imap-cache-rs
+# distroless/static provides CA certificates and an /etc/passwd entry for the
+# nonroot user, and nothing else — no shell, no package manager.
+FROM gcr.io/distroless/static-debian12:nonroot
 
-FROM debian:bookworm-slim AS runtime
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/imapped /imapped
 
-WORKDIR /app
-COPY --from=builder /app/imap-cache-rs /app/imap-cache-rs
+# 1143 IMAP, 1993 IMAPS, 8080 web UI, 9090 metrics.
+EXPOSE 1143 1993 8080 9090
 
-EXPOSE 1143 1993 8080
-
-CMD ["/app/imap-cache-rs"]
+USER nonroot:nonroot
+ENTRYPOINT ["/imapped"]
+CMD ["run"]

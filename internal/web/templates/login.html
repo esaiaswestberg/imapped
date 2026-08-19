@@ -1,0 +1,15 @@
+{{define "login.html"}}
+<div class="centred">
+  <form method="post" action="/login" class="card narrow">
+    <h1>Sign in</h1>
+    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+    <label>Email address
+      <input type="email" name="email" required autofocus autocomplete="username">
+    </label>
+    <label>Password
+      <input type="password" name="password" required autocomplete="current-password">
+    </label>
+    <button type="submit" class="primary">Sign in</button>
+  </form>
+</div>
+{{end}}
