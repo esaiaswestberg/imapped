@@ -66,6 +66,12 @@ type UpsertMailboxParams struct {
 // would silently discard sync progress every time the mailbox list is
 // refreshed, forcing a full re-enumeration on every run.
 func (s *Store) UpsertMailbox(ctx context.Context, p UpsertMailboxParams) (Mailbox, error) {
+	// The column is NOT NULL with an empty-array default, and a nil Go slice
+	// marshals to NULL rather than to that default.
+	if p.Attributes == nil {
+		p.Attributes = []string{}
+	}
+
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO mailboxes (account_id, name, canonical_name, delimiter, attributes, special_use)
 		 VALUES ($1, $2, $3, $4, $5, $6)

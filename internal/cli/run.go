@@ -14,6 +14,7 @@ import (
 	"github.com/esaiaswestberg/imapped/internal/crypto"
 	"github.com/esaiaswestberg/imapped/internal/db"
 	"github.com/esaiaswestberg/imapped/internal/httpsrv"
+	"github.com/esaiaswestberg/imapped/internal/imapsrv"
 	"github.com/esaiaswestberg/imapped/internal/logging"
 	"github.com/esaiaswestberg/imapped/internal/obs"
 	"github.com/esaiaswestberg/imapped/internal/web"
@@ -103,6 +104,25 @@ func run(ctx context.Context, res *config.Result) error {
 			Handler: httpsrv.OperationalHandler(cfg, metrics, health),
 			Logger:  log, Config: cfg,
 		})
+		group.Go(func() error { return server.Serve(ctx) })
+	}
+
+	// IMAP listeners for mail clients.
+	tlsConfig, err := imapsrv.LoadTLS(cfg)
+	if err != nil {
+		return err
+	}
+	backend := imapsrv.NewBackend(cfg, application.Store, application.Blobs, log)
+
+	if cfg.IMAP.PlaintextBind != "" {
+		server := imapsrv.NewServer("imap", cfg.IMAP.PlaintextBind, backend, nil, log)
+		group.Go(func() error { return server.Serve(ctx) })
+	}
+	if cfg.IMAP.TLSBind != "" {
+		if tlsConfig == nil {
+			return errors.New("imap.tls_bind is set but no certificate could be loaded")
+		}
+		server := imapsrv.NewServer("imaps", cfg.IMAP.TLSBind, backend, tlsConfig, log)
 		group.Go(func() error { return server.Serve(ctx) })
 	}
 

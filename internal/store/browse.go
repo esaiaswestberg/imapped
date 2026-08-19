@@ -208,3 +208,81 @@ func decodeStrings(raw []byte) []string {
 	}
 	return out
 }
+
+// ListMessagesByUID returns messages ordered by local UID ascending.
+//
+// This is the order IMAP sequence numbers follow: sequence number N is the Nth
+// message in UID order. A limit of zero returns everything, which is what a
+// SELECT needs in order to build its snapshot.
+func (s *Store) ListMessagesByUID(ctx context.Context, mailboxID int64, limit, offset int) ([]MessageSummary, int64, error) {
+	query := `SELECT mm.id, m.id, mm.local_uid, COALESCE(m.subject, ''),
+	                 COALESCE(m.addrs->'from', '[]'::jsonb), COALESCE(m.preview, ''),
+	                 m.internal_date, m.rfc822_size, mm.flags, mm.body_state,
+	                 EXISTS (SELECT 1 FROM mime_parts p
+	                         WHERE p.message_id = m.id AND p.filename IS NOT NULL),
+	                 count(*) OVER () AS total
+	          FROM mailbox_messages mm
+	          JOIN messages m ON m.id = mm.message_id
+	          WHERE mm.mailbox_id = $1 AND mm.expunged_at IS NULL
+	          ORDER BY mm.local_uid ASC`
+	args := []any{mailboxID}
+	if limit > 0 {
+		query += ` LIMIT $2 OFFSET $3`
+		args = append(args, limit, offset)
+	}
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing messages by UID: %w", err)
+	}
+	defer rows.Close()
+
+	var (
+		out   []MessageSummary
+		total int64
+	)
+	for rows.Next() {
+		var (
+			m        MessageSummary
+			fromJSON []byte
+		)
+		if err := rows.Scan(&m.MailboxMessageID, &m.MessageID, &m.LocalUID, &m.Subject,
+			&fromJSON, &m.Preview, &m.InternalDate, &m.Size, &m.Flags, &m.BodyState,
+			&m.HasAttachments, &total); err != nil {
+			return nil, 0, fmt.Errorf("scanning message: %w", err)
+		}
+		m.From = decodeStrings(fromJSON)
+		out = append(out, m)
+	}
+	return out, total, rows.Err()
+}
+
+// SetFlags replaces the flags on a message.
+func (s *Store) SetFlags(ctx context.Context, mailboxMessageID int64, flags []string) error {
+	if flags == nil {
+		flags = []string{}
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE mailbox_messages SET flags = $2, updated_at = now() WHERE id = $1`,
+		mailboxMessageID, flags)
+	return err
+}
+
+// RawMessage returns the stored blob key and size for a message.
+func (s *Store) RawMessage(ctx context.Context, mailboxMessageID int64) (string, int64, error) {
+	var (
+		key  *string
+		size int64
+	)
+	err := s.pool.QueryRow(ctx,
+		`SELECT m.blob_key, m.rfc822_size
+		 FROM mailbox_messages mm JOIN messages m ON m.id = mm.message_id
+		 WHERE mm.id = $1`, mailboxMessageID).Scan(&key, &size)
+	if err != nil {
+		return "", 0, notFound(err)
+	}
+	if key == nil {
+		return "", size, ErrNotFound
+	}
+	return *key, size, nil
+}
