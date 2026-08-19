@@ -122,6 +122,55 @@ type MessageMeta struct {
 	ModSeq        uint64
 }
 
+// MetadataFields selects which items the metadata pass requests.
+type MetadataFields int
+
+const (
+	// MetadataFieldsFlags is the minimum needed to reconcile flag changes on
+	// messages already recorded.
+	MetadataFieldsFlags MetadataFields = iota
+
+	// MetadataFieldsLean is everything needed to build a database row for a
+	// message seen for the first time.
+	//
+	// Deliberately excludes BODYSTRUCTURE. Nothing reads it — the downstream
+	// server derives body structure from the stored message instead — and on a
+	// Dovecot mailbox this proxy has never touched it is not in the index
+	// cache, so answering it forces the server to open and MIME-parse every
+	// message in the range. That is what turned an 8,300-message enumeration
+	// into a command slow enough to exceed its deadline.
+	//
+	// RFC822.SIZE is load-bearing: the body-fetch planner budgets batches by it.
+	MetadataFieldsLean
+
+	// MetadataFieldsWithBodyStructure additionally requests BODYSTRUCTURE.
+	// Retained so the cost of asking for it can be measured against a real
+	// server; not used by the sync path.
+	MetadataFieldsWithBodyStructure
+)
+
+// fetchOptions builds the wire request for a field set.
+func (f MetadataFields) fetchOptions(changedSince uint64) *imap.FetchOptions {
+	options := &imap.FetchOptions{UID: true, Flags: true}
+
+	if f >= MetadataFieldsLean {
+		options.RFC822Size = true
+		options.InternalDate = true
+		// Envelope stays: subject and correspondents are shown in message lists
+		// long before the body pass reaches those messages, and it is cheap
+		// because Dovecot caches it by default.
+		options.Envelope = true
+	}
+	if f == MetadataFieldsWithBodyStructure {
+		options.BodyStructure = &imap.FetchItemBodyStructure{}
+	}
+	if changedSince > 0 {
+		options.ChangedSince = changedSince
+		options.ModSeq = true
+	}
+	return options
+}
+
 // FetchMetadata retrieves metadata for a UID set in a single command.
 //
 // This is the heart of the performance fix. The previous implementation issued
@@ -133,27 +182,22 @@ type MessageMeta struct {
 // server sends only messages whose flags moved since that modification
 // sequence. On an unchanged mailbox that reduces the whole pass to nothing.
 func (c *Client) FetchMetadata(ctx context.Context, uids imap.NumSet, changedSince uint64, full bool) ([]MessageMeta, error) {
+	fields := MetadataFieldsFlags
+	if full {
+		fields = MetadataFieldsLean
+	}
+	return c.FetchMetadataFields(ctx, uids, changedSince, fields)
+}
+
+// FetchMetadataFields retrieves metadata using an explicit field set.
+func (c *Client) FetchMetadataFields(ctx context.Context, uids imap.NumSet, changedSince uint64, fields MetadataFields) ([]MessageMeta, error) {
 	if err := c.checkUsable(); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.FetchMetadataTimeout.Std())
 	defer cancel()
 
-	options := &imap.FetchOptions{
-		UID:   true,
-		Flags: true,
-	}
-	if full {
-		// A first sighting needs everything needed to build a database row.
-		options.RFC822Size = true
-		options.InternalDate = true
-		options.Envelope = true
-		options.BodyStructure = &imap.FetchItemBodyStructure{}
-	}
-	if changedSince > 0 {
-		options.ChangedSince = changedSince
-		options.ModSeq = true
-	}
+	options := fields.fetchOptions(changedSince)
 
 	var out []MessageMeta
 	err := c.withDeadline(ctx, func() error {

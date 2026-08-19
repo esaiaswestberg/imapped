@@ -80,3 +80,8 @@ docker: ## Build the container image
 .PHONY: clean
 clean: ## Remove build artefacts
 	rm -rf bin/ cover.out
+
+.PHONY: test-live
+test-live: ## Run read-only tests against the real account in .testing-credentials
+	@# Never in CI: needs real credentials and touches a real mailbox (read-only).
+	$(GO) test -tags live -run TestLive ./internal/upstream/ -v -count=1 -timeout 30m
