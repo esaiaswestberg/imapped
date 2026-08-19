@@ -45,8 +45,13 @@ jobs:
       # Installed with the project's own toolchain rather than via the action,
       # which ships a binary built against an older Go and then refuses to load
       # a config targeting a newer one.
+      #
+      # Pinned rather than @latest: a floating tool version means an unrelated
+      # upstream release can fail this job without anything here changing, which
+      # is what happened when @latest resolved to a version the checksum
+      # database did not carry.
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
       - name: Lint
         run: golangci-lint run --timeout 5m
