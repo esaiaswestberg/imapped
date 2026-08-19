@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -450,7 +451,16 @@ func (e *Engine) fetchBatch(
 				return nil
 			}
 
-			info, err := e.blobs.Put(ctx, blob.TypeRFC822, body)
+			// Buffered rather than streamed straight to storage, because the
+			// message must also be parsed and the parser needs the whole thing.
+			// The batch planner keeps this bounded: batches are capped by byte
+			// budget, and anything oversized is fetched alone.
+			raw, err := io.ReadAll(body)
+			if err != nil {
+				return e.store.MarkBodyFailed(ctx, claim.MailboxMessageID, err, e.cfg.Sync.BodyMaxAttempts)
+			}
+
+			info, err := e.blobs.Put(ctx, blob.TypeRFC822, bytes.NewReader(raw))
 			if err != nil {
 				return e.store.MarkBodyFailed(ctx, claim.MailboxMessageID, err, e.cfg.Sync.BodyMaxAttempts)
 			}
@@ -458,6 +468,18 @@ func (e *Engine) fetchBatch(
 			if err := e.store.AttachBody(ctx, claim.MailboxMessageID,
 				info.SHA256, info.Size, info.Key.String()); err != nil {
 				return err
+			}
+
+			// Parsing populates the searchable text and part list. A failure
+			// here must not discard the message: the body is already stored and
+			// the failure is recorded against the row.
+			messageID, err := e.store.MessageIDForMailboxMessage(ctx, claim.MailboxMessageID)
+			if err != nil {
+				return err
+			}
+			if err := e.ingest.Ingest(ctx, messageID, raw); err != nil {
+				e.log.Warn("parsing message failed, the raw message is still stored",
+					"mailbox_message_id", claim.MailboxMessageID, "error", err)
 			}
 
 			fetched.Add(1)

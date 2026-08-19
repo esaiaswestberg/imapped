@@ -15,6 +15,7 @@ import (
 	"github.com/esaiaswestberg/imapped/internal/blob"
 	"github.com/esaiaswestberg/imapped/internal/config"
 	"github.com/esaiaswestberg/imapped/internal/crypto"
+	"github.com/esaiaswestberg/imapped/internal/mailstore"
 	"github.com/esaiaswestberg/imapped/internal/store"
 	"github.com/esaiaswestberg/imapped/internal/upstream"
 )
@@ -26,6 +27,7 @@ type Engine struct {
 	blobs   blob.Store
 	sealer  *crypto.Sealer
 	connect *upstream.Connector
+	ingest  *mailstore.Ingestor
 	log     *slog.Logger
 
 	progress sync.Map // accountID -> *Progress
@@ -40,6 +42,7 @@ func New(cfg config.Config, st *store.Store, blobs blob.Store, sealer *crypto.Se
 		blobs:   blobs,
 		sealer:  sealer,
 		connect: upstream.NewConnector(cfg.Upstream, log),
+		ingest:  mailstore.NewIngestor(st, blobs, log),
 		log:     log,
 		claims:  newClaimTable(),
 	}

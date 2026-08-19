@@ -365,3 +365,94 @@ func (s *Store) CountMailboxMessages(ctx context.Context, mailboxID int64) (int6
 		mailboxID).Scan(&n)
 	return n, err
 }
+
+// ParsedContent is the searchable and displayable text extracted from a body.
+type ParsedContent struct {
+	Subject     *string
+	MessageID   *string
+	InReplyTo   *string
+	References  []string
+	Addrs       json.RawMessage
+	BodyText    *string
+	Preview     *string
+	SentDate    *time.Time
+	ParseFailed bool
+	ParseError  *string
+}
+
+// MIMEPart is one stored part of a message.
+type MIMEPart struct {
+	Path        string
+	ContentType string
+	Charset     *string
+	Disposition *string
+	Filename    *string
+	ContentID   *string
+	Encoding    *string
+	Size        int64
+	BlobKey     *string
+}
+
+// SaveParsedContent records what parsing extracted from a message body.
+//
+// Parts are replaced wholesale rather than merged, so re-parsing a message —
+// after a parser improvement, say — cannot leave stale parts behind.
+func (s *Store) SaveParsedContent(ctx context.Context, messageID int64, c ParsedContent, parts []MIMEPart) error {
+	if c.References == nil {
+		c.References = []string{}
+	}
+	return s.InTx(ctx, func(tx pgxTx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE messages
+			 SET subject = COALESCE($2, subject),
+			     message_id_hdr = COALESCE($3, message_id_hdr),
+			     in_reply_to = COALESCE($4, in_reply_to),
+			     refs = $5,
+			     addrs = COALESCE($6, addrs),
+			     body_text = $7,
+			     preview = $8,
+			     sent_date = COALESCE($9, sent_date),
+			     parse_failed = $10,
+			     parse_error = $11,
+			     updated_at = now()
+			 WHERE id = $1`,
+			messageID, c.Subject, c.MessageID, c.InReplyTo, c.References,
+			nullableJSON(c.Addrs), c.BodyText, c.Preview, c.SentDate,
+			c.ParseFailed, c.ParseError)
+		if err != nil {
+			return fmt.Errorf("saving parsed content: %w", err)
+		}
+
+		if _, err := tx.Exec(ctx, `DELETE FROM mime_parts WHERE message_id = $1`, messageID); err != nil {
+			return fmt.Errorf("clearing previous MIME parts: %w", err)
+		}
+		for _, part := range parts {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO mime_parts
+				   (message_id, part_path, content_type, charset, disposition,
+				    filename, content_id, transfer_encoding, size_octets, blob_key)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				 ON CONFLICT (message_id, part_path) DO UPDATE
+				   SET content_type = EXCLUDED.content_type,
+				       blob_key = EXCLUDED.blob_key,
+				       size_octets = EXCLUDED.size_octets`,
+				messageID, part.Path, part.ContentType, part.Charset, part.Disposition,
+				part.Filename, part.ContentID, part.Encoding, part.Size, part.BlobKey)
+			if err != nil {
+				return fmt.Errorf("saving MIME part %s: %w", part.Path, err)
+			}
+		}
+		return nil
+	})
+}
+
+// MessageIDForMailboxMessage resolves the underlying message row.
+func (s *Store) MessageIDForMailboxMessage(ctx context.Context, mailboxMessageID int64) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT message_id FROM mailbox_messages WHERE id = $1`, mailboxMessageID).Scan(&id)
+	if err != nil {
+		return 0, notFound(err)
+	}
+	return id, nil
+}

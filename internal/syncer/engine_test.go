@@ -4,6 +4,7 @@ package syncer_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/esaiaswestberg/imapped/internal/config"
 	"github.com/esaiaswestberg/imapped/internal/crypto"
 	"github.com/esaiaswestberg/imapped/internal/logging"
+	"github.com/esaiaswestberg/imapped/internal/search"
 	"github.com/esaiaswestberg/imapped/internal/store"
 	"github.com/esaiaswestberg/imapped/internal/syncer"
 	"github.com/esaiaswestberg/imapped/internal/testutil/fakeimap"
@@ -347,5 +349,86 @@ func TestIdenticalMessagesAreDeduplicated(t *testing.T) {
 	}
 	if messages != 20 {
 		t.Errorf("stored %d message rows, want 20 after deduplication", messages)
+	}
+}
+
+// Synced mail must be searchable, which requires the body pass to have parsed
+// each message rather than merely stored its bytes.
+func TestSyncedMailIsSearchable(t *testing.T) {
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{
+			Name: "INBOX",
+			Messages: []fakeimap.Message{
+				{Subject: "Quarterly invoice", Body: "The invoice for the third quarter is attached."},
+				{Subject: "Lunch plans", Body: "Shall we meet at the usual place near the station?"},
+				{Subject: "Holiday photos", Body: "Here are the photographs from the trip to the coast."},
+			},
+		}},
+	})
+
+	h.sync(t)
+
+	ctx := context.Background()
+	searcher := search.NewPostgres(h.store.Pool(), "english")
+
+	results, total, err := searcher.Search(ctx, search.Query{
+		Text: "invoice", AccountID: h.accountID,
+	})
+	if err != nil {
+		t.Fatalf("searching: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("found %d results for \"invoice\", want 1 (total %d)", len(results), total)
+	}
+	if results[0].Subject != "Quarterly invoice" {
+		t.Errorf("matched %q, want \"Quarterly invoice\"", results[0].Subject)
+	}
+
+	// A word that appears only in the body proves the full text was indexed,
+	// not just the subject or a truncated preview.
+	results, _, err = searcher.Search(ctx, search.Query{
+		Text: "photographs", AccountID: h.accountID,
+	})
+	if err != nil {
+		t.Fatalf("searching: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("found %d results for a body-only word, want 1", len(results))
+	}
+}
+
+// Parsing must populate the display fields, not just the search index.
+func TestSyncPopulatesMessageContent(t *testing.T) {
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{
+			Name: "INBOX",
+			Messages: []fakeimap.Message{
+				{Subject: "Readable subject", From: "alice@example.com", Body: "A body worth previewing."},
+			},
+		}},
+	})
+
+	h.sync(t)
+
+	var subject, preview, bodyText string
+	var parseFailed bool
+	err := h.store.Pool().QueryRow(context.Background(),
+		`SELECT COALESCE(subject,''), COALESCE(preview,''), COALESCE(body_text,''), parse_failed
+		 FROM messages LIMIT 1`).Scan(&subject, &preview, &bodyText, &parseFailed)
+	if err != nil {
+		t.Fatalf("reading message: %v", err)
+	}
+
+	if parseFailed {
+		t.Error("parsing was recorded as failed")
+	}
+	if subject != "Readable subject" {
+		t.Errorf("subject = %q", subject)
+	}
+	if preview == "" {
+		t.Error("preview is empty")
+	}
+	if !strings.Contains(bodyText, "worth previewing") {
+		t.Errorf("body text = %q", bodyText)
 	}
 }
