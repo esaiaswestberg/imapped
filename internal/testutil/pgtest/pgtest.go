@@ -32,7 +32,13 @@ import (
 // EnvURL names the environment variable holding a Postgres URL to reuse.
 const EnvURL = "IMAPPED_TEST_PG_URL"
 
-const templateDBName = "imapped_template"
+// templateDBName is unique per test binary.
+//
+// `go test ./...` runs each package's tests in a separate process, and those
+// processes run concurrently. A single shared template name meant one package
+// would drop and recreate the template while another was cloning from it,
+// producing failures that looked like schema bugs but were pure interference.
+var templateDBName = fmt.Sprintf("imapped_template_%d", os.Getpid())
 
 var (
 	setupOnce sync.Once
@@ -81,7 +87,18 @@ func New(t *testing.T) *pgxpool.Pool {
 		})
 	})
 
-	pool, err := pgxpool.New(ctx, replaceDBName(adminURL, name))
+	// Configure the pool explicitly rather than taking pgx's default, which
+	// scales with CPU count: on a many-core machine several test pools can
+	// otherwise exhaust the server's connection limit and produce failures that
+	// look like application bugs.
+	poolCfg, err := pgxpool.ParseConfig(replaceDBName(adminURL, name))
+	if err != nil {
+		t.Fatalf("parsing test database URL: %v", err)
+	}
+	poolCfg.MaxConns = 10
+	poolCfg.MinConns = 0
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		t.Fatalf("connecting to test database %s: %v", name, err)
 	}
@@ -121,6 +138,11 @@ func setup() (string, error) {
 
 	// Rebuild the template from scratch so a schema change in the working tree
 	// is never masked by a stale template left over from an earlier run.
+	//
+	// Only this process's own template is touched. Sweeping others looks tidy
+	// but is wrong: concurrent test binaries each own a live template, and
+	// removing one out from under its owner breaks it. Abandoned templates are
+	// harmless and disappear with the throwaway server.
 	err := withAdminConn(ctx, baseURL, func(conn *pgx.Conn) error {
 		if _, err := conn.Exec(ctx, fmt.Sprintf(
 			"DROP DATABASE IF EXISTS %s WITH (FORCE)", quoteIdent(templateDBName))); err != nil {
