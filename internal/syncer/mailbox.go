@@ -513,8 +513,13 @@ func (e *Engine) bodyPass(
 			if err != nil {
 				return err
 			}
-			workerClient, err := e.connect.Connect(groupCtx, creds)
-			if err != nil {
+			// A session rather than a bare connection: a worker that loses its
+			// connection reconnects and re-opens the mailbox by itself, instead
+			// of being lost for the rest of the run.
+			session := e.connect.NewSession(creds)
+			defer session.Close()
+
+			if _, err := session.Select(groupCtx, mailbox.Name, true); err != nil {
 				// A server refusing further connections is a reason to run with
 				// fewer workers, not to fail the sync. Warn rather than inform:
 				// losing a worker silently is how a download queue ends up
@@ -526,14 +531,6 @@ func (e *Engine) bodyPass(
 					recordWorker(nil)
 					return nil
 				}
-				e.log.Warn("a body-fetch worker could not connect",
-					"account_id", account.ID, "worker", worker, "error", err)
-				recordWorker(err)
-				return nil
-			}
-			defer workerClient.Close()
-
-			if _, err := workerClient.Select(groupCtx, mailbox.Name, true); err != nil {
 				e.log.Warn("a body-fetch worker could not open the mailbox",
 					"mailbox", mailbox.Name, "worker", worker, "error", err)
 				recordWorker(err)
@@ -545,7 +542,7 @@ func (e *Engine) bodyPass(
 			// reading from it.
 			var workerErr error
 			for batch := range batches {
-				if err := e.fetchBatch(groupCtx, workerClient, mailbox, batch, p, &fetched, &bytes); err != nil {
+				if err := e.fetchBatchSession(groupCtx, session, mailbox, batch, p, &fetched, &bytes); err != nil {
 					e.log.Warn("a batch of message bodies failed; the messages stay queued for the next run",
 						"mailbox", mailbox.Name, "worker", worker, "size", len(batch), "error", err)
 					workerErr = err
@@ -581,6 +578,24 @@ func (e *Engine) bodyPass(
 	}
 
 	return fetched.Load(), bytes.Load(), err
+}
+
+// fetchBatchSession downloads one batch through a reconnecting session.
+//
+// Retrying a fetch is safe because a claim is consumed the first time its UID is
+// seen: on a repeat the handler finds no claim, drains the response and moves
+// on, so a message is never stored twice and the connection stays in step.
+func (e *Engine) fetchBatchSession(
+	ctx context.Context,
+	session *upstream.Session,
+	mailbox store.Mailbox,
+	batch []SizedUID,
+	p *Progress,
+	fetched, bytesTotal *atomic.Int64,
+) error {
+	return session.Do(ctx, "fetch bodies", func(ctx context.Context, client *upstream.Client) error {
+		return e.fetchBatch(ctx, client, mailbox, batch, p, fetched, bytesTotal)
+	})
 }
 
 // fetchBatch downloads one batch and stores each body.

@@ -43,11 +43,12 @@ func (e *Engine) ReplayMutations(ctx context.Context, accountID int64) (int, err
 	if err != nil {
 		return 0, err
 	}
-	client, err := e.connect.Connect(ctx, creds)
-	if err != nil {
-		return 0, fmt.Errorf("connecting to replay changes: %w", err)
-	}
-	defer client.Close()
+	// A session, so a connection lost partway through a queue of changes is
+	// replaced rather than ending the pass. Replay is idempotent — each queued
+	// change carries the flags it wants, not a delta — so re-running one after
+	// a reconnection is indistinguishable from running it once.
+	session := e.connect.NewSession(creds)
+	defer session.Close()
 
 	worker := workerName()
 	applied := 0
@@ -67,7 +68,7 @@ func (e *Engine) ReplayMutations(ctx context.Context, accountID int64) (int, err
 		}
 
 		for _, mutation := range batch {
-			err := e.applyMutation(ctx, client, mutation, &selectedMailbox)
+			err := e.applyMutation(ctx, session, mutation, &selectedMailbox)
 			if err == nil {
 				if err := e.store.MutationSucceeded(ctx, mutation.ID); err != nil {
 					return applied, err
@@ -96,7 +97,7 @@ func (e *Engine) ReplayMutations(ctx context.Context, accountID int64) (int, err
 	}
 }
 
-func (e *Engine) applyMutation(ctx context.Context, client *upstream.Client,
+func (e *Engine) applyMutation(ctx context.Context, session *upstream.Session,
 	mutation store.Mutation, selectedMailbox *string) error {
 
 	switch mutation.Type {
@@ -111,9 +112,10 @@ func (e *Engine) applyMutation(ctx context.Context, client *upstream.Client,
 			return nil
 		}
 
-		// SELECT is stateful, so only re-issue it when the target changes.
+		// SELECT is stateful, so only re-issue it when the target changes. The
+		// session restores it by itself after a reconnection.
 		if *selectedMailbox != payload.Mailbox {
-			if _, err := client.Select(ctx, payload.Mailbox, false); err != nil {
+			if _, err := session.Select(ctx, payload.Mailbox, false); err != nil {
 				return err
 			}
 			*selectedMailbox = payload.Mailbox
@@ -123,7 +125,9 @@ func (e *Engine) applyMutation(ctx context.Context, client *upstream.Client,
 		for _, name := range payload.Flags {
 			flags = append(flags, imap.Flag(name))
 		}
-		return client.StoreFlags(ctx, imap.UID(payload.UpstreamUID), flags)
+		return session.Do(ctx, "store flags", func(ctx context.Context, client *upstream.Client) error {
+			return client.StoreFlags(ctx, imap.UID(payload.UpstreamUID), flags)
+		})
 
 	default:
 		return fmt.Errorf("unsupported change type %q", mutation.Type)

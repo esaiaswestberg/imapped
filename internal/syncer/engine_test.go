@@ -851,3 +851,54 @@ func TestOneFailingBodyWorkerDoesNotStopTheOthers(t *testing.T) {
 	}
 	t.Logf("%d stored, %d still queued", stored, queued)
 }
+
+// A sync must complete even when connections keep dropping underneath it.
+//
+// Body workers previously held a bare connection: one that died took the worker
+// with it for the rest of the run, and messages it had claimed sat undownloaded
+// until a later sync. Workers now hold reconnecting sessions, so a dropped
+// connection costs a reconnection rather than a worker.
+func TestSyncCompletesDespiteConnectionsDropping(t *testing.T) {
+	const messages = 120
+
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(messages)}},
+		// Every connection is severed after a few commands, so nothing finishes
+		// without reconnection working.
+		Chaos: fakeimap.Chaos{DropAfter: 8},
+	}, func(c *config.Config) {
+		c.Sync.ConnectionsPerAccount = 3
+		c.Sync.BodyBatchMaxMsgs = 10
+		c.Sync.MetadataBatchMessages = 40
+		c.Upstream.RetryMaxAttempts = 8
+		c.Upstream.RetryBaseDelay = config.Duration(10 * time.Millisecond)
+		c.Upstream.RetryMaxDelay = config.Duration(100 * time.Millisecond)
+	})
+
+	result, err := h.trySync(t)
+	t.Logf("result=%+v err=%v", result, err)
+
+	var stored, queued int64
+	if err := h.store.Pool().QueryRow(context.Background(),
+		`SELECT count(*) FILTER (WHERE body_state = 'stored'),
+		        count(*) FILTER (WHERE body_state IN ('pending','fetching'))
+		 FROM mailbox_messages`).Scan(&stored, &queued); err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	t.Logf("%d stored, %d queued", stored, queued)
+
+	// Nothing may be lost, whatever happened to individual connections.
+	if stored+queued != messages {
+		t.Errorf("%d stored + %d queued = %d, want %d", stored, queued, stored+queued, messages)
+	}
+
+	// And downloading must have made real progress rather than stalling at the
+	// first dropped connection.
+	if stored == 0 {
+		t.Error("no body was downloaded; workers are not recovering from dropped connections")
+	}
+
+	if logins := h.server.Recorder().Count("LOGIN"); logins < 2 {
+		t.Errorf("only %d logins; connections were not being replaced", logins)
+	}
+}
