@@ -392,6 +392,12 @@ type Progress struct {
 	commands       atomic.Int64
 	pendingBodies  atomic.Int64
 	startedAt      time.Time
+
+	// bodiesAtMetadataDone is how many bodies had been downloaded at the moment
+	// the metadata pass finished. If the two passes run concurrently it is
+	// greater than zero; if they run in sequence it is necessarily zero, which
+	// makes the overlap observable without sampling a race.
+	bodiesAtMetadataDone atomic.Int64
 }
 
 func newProgress(accountID int64) *Progress {
@@ -409,6 +415,18 @@ func (p *Progress) addCommands(n int64)      { p.commands.Add(n) }
 func (p *Progress) addMessages(n int64)      { p.messagesNew.Add(n) }
 func (p *Progress) addBody(bytes int64)      { p.bodiesFetched.Add(1); p.bytesFetched.Add(bytes) }
 func (p *Progress) setPendingBodies(n int64) { p.pendingBodies.Store(n) }
+
+// recordMetadataComplete notes how much of the download had already happened by
+// the time enumeration finished.
+func (p *Progress) recordMetadataComplete() {
+	p.bodiesAtMetadataDone.Store(p.bodiesFetched.Load())
+}
+
+// BodiesWhenMetadataFinished reports how many bodies were already downloaded
+// when enumeration completed. Zero means the two passes ran in sequence.
+func (p *Progress) BodiesWhenMetadataFinished() int64 {
+	return p.bodiesAtMetadataDone.Load()
+}
 
 // Phase reports the current stage, for display.
 func (p *Progress) Phase() string { s, _ := p.phase.Load().(string); return s }

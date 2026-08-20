@@ -641,10 +641,9 @@ func TestMetadataFetchDoesNotRequestBodyStructure(t *testing.T) {
 func TestBodiesDownloadWhileMetadataIsStillRunning(t *testing.T) {
 	const messages = 300
 
-	// The server is throttled deliberately. Over loopback the metadata pass
-	// finishes in milliseconds, so there would be no window in which to observe
-	// an overlap and the test would pass or fail on timing rather than on
-	// behaviour.
+	// Throttled so the metadata pass takes long enough for downloading to
+	// overlap it at all. Over loopback it would otherwise finish before a
+	// single body could be fetched.
 	h := newHarness(t, fakeimap.Options{
 		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(messages)}},
 		Chaos:     fakeimap.Chaos{SlowBytes: 200_000},
@@ -653,45 +652,43 @@ func TestBodiesDownloadWhileMetadataIsStillRunning(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	done := make(chan error, 1)
+	progressSeen := make(chan *syncer.Progress, 1)
 	go func() {
-		_, err := h.engine.SyncAccount(ctx, h.accountID, "manual")
-		done <- err
+		for range 600 {
+			if p, ok := h.engine.ProgressFor(h.accountID); ok {
+				select {
+				case progressSeen <- p:
+				default:
+				}
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}()
 
-	overlapped := false
-	deadline := time.After(4 * time.Minute)
-
-poll:
-	for {
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("syncing: %v", err)
-			}
-			break poll
-		case <-deadline:
-			t.Fatal("sync did not finish in time")
-		case <-time.After(50 * time.Millisecond):
-			progress, ok := h.engine.ProgressFor(h.accountID)
-			if !ok {
-				continue
-			}
-			if strings.HasPrefix(progress.Phase(), "metadata:") {
-				_, _, _, bodies, _, _ := progress.Counts()
-				if bodies > 0 {
-					overlapped = true
-				}
-			}
-		}
+	if _, err := h.engine.SyncAccount(ctx, h.accountID, "manual"); err != nil {
+		t.Fatalf("syncing: %v", err)
 	}
 
-	if !overlapped {
-		t.Error("no body was downloaded while metadata was still being enumerated; " +
-			"the passes are running in sequence, so nothing is readable until enumeration completes")
+	// The count of bodies already downloaded when enumeration finished is
+	// recorded during the run, so this asserts on what happened rather than on
+	// whether a sampling loop happened to observe it — which is the difference
+	// between a test that fails when the behaviour regresses and one that fails
+	// when the machine is fast.
+	var progress *syncer.Progress
+	select {
+	case progress = <-progressSeen:
+	default:
+		t.Fatal("never observed the running sync")
 	}
 
-	// And the sync must still be correct: everything ends up stored.
+	if overlap := progress.BodiesWhenMetadataFinished(); overlap == 0 {
+		t.Error("no body had been downloaded when enumeration finished; the passes are " +
+			"running in sequence, so nothing is readable until enumeration completes")
+	} else {
+		t.Logf("%d bodies were already downloaded when enumeration finished", overlap)
+	}
+
 	var stored int64
 	if err := h.store.Pool().QueryRow(context.Background(),
 		`SELECT count(*) FROM mailbox_messages WHERE body_state = 'stored'`).Scan(&stored); err != nil {

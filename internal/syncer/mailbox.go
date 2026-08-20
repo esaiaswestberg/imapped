@@ -124,6 +124,7 @@ func (e *Engine) syncMailbox(
 	// Tell the body pass no further work is coming, whether the metadata pass
 	// succeeded or not: bodies already recorded are still worth downloading,
 	// and leaving the producer waiting would hang the mailbox.
+	p.recordMetadataComplete()
 	close(metadataDone)
 	p.setPhase("bodies: " + box.Name)
 	wg.Wait()
