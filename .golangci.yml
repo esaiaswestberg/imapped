@@ -29,6 +29,7 @@ linters:
         - (*os.File).Close
         - os.Remove
         - (*github.com/esaiaswestberg/imapped/internal/upstream.Client).Close
+        - (*github.com/esaiaswestberg/imapped/internal/upstream.Session).Close
         - (*github.com/jackc/pgx/v5.Conn).Close
 
     staticcheck:
