@@ -3,6 +3,7 @@ package imapsrv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -107,7 +108,7 @@ func (s *session) writeMessage(ctx context.Context, w *imapserver.FetchWriter,
 	}
 
 	for _, section := range options.BodySection {
-		if err := writeSection(writer, section, raw); err != nil {
+		if err := writeSection(writer, section, raw, item.message); err != nil {
 			return err
 		}
 	}
@@ -130,13 +131,31 @@ func (s *session) loadRaw(ctx context.Context, mailboxMessageID int64) ([]byte, 
 }
 
 // writeSection serves a BODY[...] request.
-func writeSection(writer *imapserver.FetchResponseWriter, section *imap.FetchItemBodySection, raw []byte) error {
+//
+// Mail clients build their message list from BODY[HEADER.FIELDS (...)] rather
+// than from ENVELOPE, so this is the path that decides whether a mailbox looks
+// populated or blank. Serving it purely by slicing the stored message meant
+// that a mailbox still downloading showed thousands of entries with no subject,
+// no sender and today's date — while every one of those values sat in the
+// database, unused.
+func writeSection(writer *imapserver.FetchResponseWriter, section *imap.FetchItemBodySection,
+	raw []byte, summary store.MessageSummary) error {
+
 	content := raw
 
-	// A header-only request must not transfer the whole message.
 	switch section.Specifier {
 	case imap.PartSpecifierHeader:
 		content = headerBytes(raw)
+		if len(content) == 0 {
+			// The message itself has not been downloaded yet, so build the
+			// headers from what was recorded when it was enumerated.
+			content = synthesiseHeader(summary)
+		}
+		if len(section.HeaderFields) > 0 {
+			content = selectHeaderFields(content, section.HeaderFields, false)
+		} else if len(section.HeaderFieldsNot) > 0 {
+			content = selectHeaderFields(content, section.HeaderFieldsNot, true)
+		}
 	case imap.PartSpecifierText:
 		content = textBytes(raw)
 	}
@@ -185,6 +204,82 @@ func textBytes(raw []byte) []byte {
 		return raw[idx+2:]
 	}
 	return nil
+}
+
+// synthesiseHeader builds an RFC 5322 header block from stored metadata.
+//
+// It is a faithful subset rather than the original: the fields a client needs
+// to list a message, drawn from what the metadata pass recorded. Once the body
+// arrives the real headers are served instead.
+func synthesiseHeader(m store.MessageSummary) []byte {
+	var b strings.Builder
+
+	writeAddressList := func(name string, values []string) {
+		if len(values) == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "%s: %s\r\n", name, strings.Join(values, ", "))
+	}
+
+	writeAddressList("From", m.From)
+	writeAddressList("To", m.To)
+	writeAddressList("Cc", m.Cc)
+
+	if m.Subject != "" {
+		fmt.Fprintf(&b, "Subject: %s\r\n", m.Subject)
+	}
+	if m.InternalDate != nil && !m.InternalDate.IsZero() {
+		fmt.Fprintf(&b, "Date: %s\r\n", m.InternalDate.Format(time.RFC1123Z))
+	}
+
+	// Named so it is obvious to anyone reading a raw message that this header
+	// block was reconstructed rather than received.
+	b.WriteString("X-Imapped-Body-State: " + m.BodyState + "\r\n")
+	b.WriteString("\r\n")
+
+	return []byte(b.String())
+}
+
+// selectHeaderFields keeps or drops the named header fields.
+//
+// A client asking for a handful of fields should not be sent the whole block:
+// it asked precisely to avoid that.
+func selectHeaderFields(header []byte, fields []string, exclude bool) []byte {
+	wanted := make(map[string]bool, len(fields))
+	for _, field := range fields {
+		wanted[strings.ToLower(field)] = true
+	}
+
+	var (
+		out  strings.Builder
+		keep bool
+	)
+	for _, line := range strings.Split(string(header), "\r\n") {
+		if line == "" {
+			continue
+		}
+		// A line starting with whitespace continues the previous field.
+		if line[0] == ' ' || line[0] == '\t' {
+			if keep {
+				out.WriteString(line)
+				out.WriteString("\r\n")
+			}
+			continue
+		}
+
+		name, _, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		keep = wanted[strings.ToLower(strings.TrimSpace(name))] != exclude
+		if keep {
+			out.WriteString(line)
+			out.WriteString("\r\n")
+		}
+	}
+	out.WriteString("\r\n")
+
+	return []byte(out.String())
 }
 
 func toFlags(names []string) []imap.Flag {

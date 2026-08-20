@@ -31,6 +31,9 @@ type harness struct {
 	mailboxID int64
 }
 
+// mailboxID is exposed so a test can seed rows the normal path would not
+// produce, such as a message recorded but not yet downloaded.
+
 // newHarness stands up the IMAP server over a seeded database.
 //
 // The client driving it is go-imap's own, which means these are genuine
@@ -498,4 +501,104 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(digits)
+}
+
+// A message whose body has not been downloaded must still show its headers.
+//
+// Mail clients build their message list from BODY[HEADER.FIELDS (...)], not
+// from ENVELOPE. Serving that only by slicing the stored message meant a
+// mailbox mid-download appeared as thousands of entries with no subject, no
+// sender and today's date — even though every one of those values was sitting
+// in the database.
+func TestHeaderFieldsAreServedBeforeTheBodyArrives(t *testing.T) {
+	h := newHarness(t, 0)
+	ctx := context.Background()
+
+	var messageID int64
+	err := h.store.Pool().QueryRow(ctx,
+		`INSERT INTO messages (account_id, rfc822_sha256, rfc822_size, subject, addrs, internal_date)
+		 SELECT mb.account_id, $1, 4096, 'A subject from metadata',
+		        '{"from":["Alice <alice@example.com>"],"to":["bob@example.com"]}'::jsonb,
+		        '2026-03-04 05:06:07+00'
+		 FROM mailboxes mb WHERE mb.id = $2
+		 RETURNING id`, make([]byte, 32), h.mailboxID).Scan(&messageID)
+	if err != nil {
+		t.Fatalf("inserting message: %v", err)
+	}
+	if _, err := h.store.Pool().Exec(ctx,
+		`INSERT INTO mailbox_messages (mailbox_id, message_id, local_uid, upstream_uid, body_state, flags)
+		 VALUES ($1, $2, 1, 1, 'pending', '{}')`, h.mailboxID, messageID); err != nil {
+		t.Fatalf("linking message: %v", err)
+	}
+	if _, err := h.store.Pool().Exec(ctx,
+		`UPDATE mailboxes SET local_uidnext = 2 WHERE id = $1`, h.mailboxID); err != nil {
+		t.Fatalf("updating uidnext: %v", err)
+	}
+
+	client := h.login(t)
+	if _, err := client.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatalf("selecting: %v", err)
+	}
+
+	var set imap.SeqSet
+	set.AddNum(1)
+	messages, err := client.Fetch(set, &imap.FetchOptions{
+		UID: true, Flags: true, RFC822Size: true,
+		BodySection: []*imap.FetchItemBodySection{{
+			Specifier:    imap.PartSpecifierHeader,
+			HeaderFields: []string{"From", "To", "Subject", "Date", "Message-ID"},
+		}},
+	}).Collect()
+	if err != nil {
+		t.Fatalf("fetching headers: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("fetched %d messages, want 1", len(messages))
+	}
+
+	var headers string
+	for _, contents := range messages[0].BodySection {
+		headers = string(contents.Bytes)
+	}
+	t.Logf("headers served:\n%s", headers)
+
+	for _, want := range []string{"A subject from metadata", "alice@example.com", "2026"} {
+		if !strings.Contains(headers, want) {
+			t.Errorf("headers do not contain %q; a client would show this message blank", want)
+		}
+	}
+}
+
+// A client asking for a few header fields must not receive the whole block.
+func TestHeaderFieldsAreFiltered(t *testing.T) {
+	h := newHarness(t, 3)
+	client := h.login(t)
+
+	if _, err := client.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatalf("selecting: %v", err)
+	}
+
+	var set imap.SeqSet
+	set.AddNum(1)
+	messages, err := client.Fetch(set, &imap.FetchOptions{
+		BodySection: []*imap.FetchItemBodySection{{
+			Specifier:    imap.PartSpecifierHeader,
+			HeaderFields: []string{"Subject"},
+		}},
+	}).Collect()
+	if err != nil {
+		t.Fatalf("fetching: %v", err)
+	}
+
+	var headers string
+	for _, contents := range messages[0].BodySection {
+		headers = string(contents.Bytes)
+	}
+
+	if !strings.Contains(headers, "Subject:") {
+		t.Errorf("the requested field is missing: %q", headers)
+	}
+	if strings.Contains(headers, "Message-ID:") || strings.Contains(headers, "MIME-Version:") {
+		t.Errorf("fields that were not asked for were returned: %q", headers)
+	}
 }

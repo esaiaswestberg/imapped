@@ -14,9 +14,13 @@ type MessageSummary struct {
 	LocalUID         int64
 	// UpstreamUID is the message's identity on the mirrored server, zero if it
 	// has never existed there.
-	UpstreamUID    int64
-	Subject        string
+	UpstreamUID int64
+	Subject     string
+	// From, To and Cc are the correspondents, needed to build the headers a
+	// mail client asks for before a message body has been downloaded.
 	From           []string
+	To             []string
+	Cc             []string
 	Preview        string
 	InternalDate   *time.Time
 	Size           int64
@@ -44,7 +48,7 @@ func (s *Store) ListMessages(ctx context.Context, mailboxID int64, limit, offset
 	rows, err := s.pool.Query(ctx,
 		`SELECT mm.id, m.id, mm.local_uid, COALESCE(mm.upstream_uid, 0),
 		        COALESCE(m.subject, '(no subject)'),
-		        COALESCE(m.addrs->'from', '[]'::jsonb), COALESCE(m.preview, ''),
+		        COALESCE(m.addrs, '{}'::jsonb), COALESCE(m.preview, ''),
 		        m.internal_date, m.rfc822_size, mm.flags, mm.body_state,
 		        EXISTS (SELECT 1 FROM mime_parts p
 		                WHERE p.message_id = m.id AND p.filename IS NOT NULL),
@@ -65,15 +69,15 @@ func (s *Store) ListMessages(ctx context.Context, mailboxID int64, limit, offset
 	)
 	for rows.Next() {
 		var (
-			m        MessageSummary
-			fromJSON []byte
+			m         MessageSummary
+			addrsJSON []byte
 		)
 		if err := rows.Scan(&m.MailboxMessageID, &m.MessageID, &m.LocalUID, &m.UpstreamUID,
-			&m.Subject, &fromJSON, &m.Preview, &m.InternalDate, &m.Size, &m.Flags,
+			&m.Subject, &addrsJSON, &m.Preview, &m.InternalDate, &m.Size, &m.Flags,
 			&m.BodyState, &m.HasAttachments, &total); err != nil {
 			return nil, 0, fmt.Errorf("scanning message: %w", err)
 		}
-		m.From = decodeStrings(fromJSON)
+		m.From, m.To, m.Cc = decodeAddresses(addrsJSON)
 		out = append(out, m)
 	}
 	return out, total, rows.Err()
@@ -222,7 +226,7 @@ func decodeStrings(raw []byte) []string {
 func (s *Store) ListMessagesByUID(ctx context.Context, mailboxID int64, limit, offset int) ([]MessageSummary, int64, error) {
 	query := `SELECT mm.id, m.id, mm.local_uid, COALESCE(mm.upstream_uid, 0),
 	                 COALESCE(m.subject, ''),
-	                 COALESCE(m.addrs->'from', '[]'::jsonb), COALESCE(m.preview, ''),
+	                 COALESCE(m.addrs, '{}'::jsonb), COALESCE(m.preview, ''),
 	                 m.internal_date, m.rfc822_size, mm.flags, mm.body_state,
 	                 EXISTS (SELECT 1 FROM mime_parts p
 	                         WHERE p.message_id = m.id AND p.filename IS NOT NULL),
@@ -249,15 +253,15 @@ func (s *Store) ListMessagesByUID(ctx context.Context, mailboxID int64, limit, o
 	)
 	for rows.Next() {
 		var (
-			m        MessageSummary
-			fromJSON []byte
+			m         MessageSummary
+			addrsJSON []byte
 		)
 		if err := rows.Scan(&m.MailboxMessageID, &m.MessageID, &m.LocalUID, &m.UpstreamUID,
-			&m.Subject, &fromJSON, &m.Preview, &m.InternalDate, &m.Size, &m.Flags,
+			&m.Subject, &addrsJSON, &m.Preview, &m.InternalDate, &m.Size, &m.Flags,
 			&m.BodyState, &m.HasAttachments, &total); err != nil {
 			return nil, 0, fmt.Errorf("scanning message: %w", err)
 		}
-		m.From = decodeStrings(fromJSON)
+		m.From, m.To, m.Cc = decodeAddresses(addrsJSON)
 		out = append(out, m)
 	}
 	return out, total, rows.Err()
@@ -291,4 +295,17 @@ func (s *Store) RawMessage(ctx context.Context, mailboxMessageID int64) (string,
 		return "", size, ErrNotFound
 	}
 	return *key, size, nil
+}
+
+// decodeAddresses pulls the correspondent lists out of the stored address
+// object, which holds from, to, cc, bcc and reply-to together.
+func decodeAddresses(raw []byte) (from, to, cc []string) {
+	if len(raw) == 0 {
+		return nil, nil, nil
+	}
+	var parsed map[string][]string
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, nil, nil
+	}
+	return parsed["from"], parsed["to"], parsed["cc"]
 }
