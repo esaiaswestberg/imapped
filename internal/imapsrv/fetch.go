@@ -78,11 +78,10 @@ func (s *session) writeMessage(ctx context.Context, w *imapserver.FetchWriter,
 		writer.WriteFlags(toFlags(item.message.Flags))
 	}
 	if options.InternalDate {
-		date := time.Time{}
-		if item.message.InternalDate != nil {
-			date = *item.message.InternalDate
-		}
-		writer.WriteInternalDate(date)
+		// Falls back to the message's own Date header when the mirrored server
+		// gave us no INTERNALDATE, since a zero timestamp is worse than an
+		// approximate one for a client that sorts on it.
+		writer.WriteInternalDate(headerDate(item.message))
 	}
 	if options.RFC822Size {
 		writer.WriteRFC822Size(item.message.Size)
@@ -228,8 +227,15 @@ func synthesiseHeader(m store.MessageSummary) []byte {
 	if m.Subject != "" {
 		fmt.Fprintf(&b, "Subject: %s\r\n", m.Subject)
 	}
-	if m.InternalDate != nil && !m.InternalDate.IsZero() {
-		fmt.Fprintf(&b, "Date: %s\r\n", m.InternalDate.Format(time.RFC1123Z))
+	if m.MessageIDHdr != "" {
+		fmt.Fprintf(&b, "Message-ID: %s\r\n", angled(m.MessageIDHdr))
+	}
+	// The message's own Date header first, falling back to the date the server
+	// filed it under. A client that finds no Date at all stamps the message
+	// with the time it listed it, which is how a mailbox of old mail ends up
+	// looking like it all arrived this afternoon.
+	if date := headerDate(m); !date.IsZero() {
+		fmt.Fprintf(&b, "Date: %s\r\n", date.Format(time.RFC1123Z))
 	}
 
 	// Named so it is obvious to anyone reading a raw message that this header
@@ -238,6 +244,26 @@ func synthesiseHeader(m store.MessageSummary) []byte {
 	b.WriteString("\r\n")
 
 	return []byte(b.String())
+}
+
+// headerDate picks the timestamp to serve as a message's Date header.
+func headerDate(m store.MessageSummary) time.Time {
+	if m.SentDate != nil && !m.SentDate.IsZero() {
+		return *m.SentDate
+	}
+	if m.InternalDate != nil && !m.InternalDate.IsZero() {
+		return *m.InternalDate
+	}
+	return time.Time{}
+}
+
+// angled wraps a Message-ID in the brackets RFC 5322 requires, tolerating a
+// stored value that already carries them.
+func angled(id string) string {
+	if strings.HasPrefix(id, "<") && strings.HasSuffix(id, ">") {
+		return id
+	}
+	return "<" + id + ">"
 }
 
 // selectHeaderFields keeps or drops the named header fields.

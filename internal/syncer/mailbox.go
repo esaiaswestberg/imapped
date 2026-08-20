@@ -740,10 +740,17 @@ func buildMeta(accountID, mailboxID int64, meta upstream.MessageMeta) store.Mess
 }
 
 func addressMap(envelope *imap.Envelope) map[string][]string {
+	// The display name is kept alongside the address. A client shows the name,
+	// and serving a bare address for every message that has not been downloaded
+	// makes the list look markedly worse than the mail it mirrors.
 	render := func(addrs []imap.Address) []string {
 		out := make([]string, 0, len(addrs))
 		for _, a := range addrs {
-			out = append(out, sanitiseText(a.Addr()))
+			addr := sanitiseText(a.Addr())
+			if name := sanitiseText(a.Name); name != "" {
+				addr = quoteDisplayName(name) + " <" + addr + ">"
+			}
+			out = append(out, addr)
 		}
 		return out
 	}
@@ -754,6 +761,15 @@ func addressMap(envelope *imap.Envelope) map[string][]string {
 		"bcc":      render(envelope.Bcc),
 		"reply_to": render(envelope.ReplyTo),
 	}
+}
+
+// quoteDisplayName quotes a display name that contains characters RFC 5322
+// treats as special, so the stored form can be served verbatim as a header.
+func quoteDisplayName(name string) string {
+	if !strings.ContainsAny(name, `"\<>@,;:.[]()`) {
+		return name
+	}
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(name) + `"`
 }
 
 // sanitiseText makes a header value safe to store.

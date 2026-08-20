@@ -569,6 +569,80 @@ func TestHeaderFieldsAreServedBeforeTheBodyArrives(t *testing.T) {
 	}
 }
 
+// A server that omits INTERNALDATE must not leave a client dating every message
+// to the moment it listed them. The message's own Date header, recorded from
+// the envelope, carries the same information and is what a client would show
+// anyway.
+func TestDateIsServedFromTheEnvelopeWhenInternalDateIsMissing(t *testing.T) {
+	h := newHarness(t, 0)
+	ctx := context.Background()
+
+	var messageID int64
+	err := h.store.Pool().QueryRow(ctx,
+		`INSERT INTO messages (account_id, rfc822_sha256, rfc822_size, subject, addrs,
+		                       internal_date, sent_date, message_id_hdr)
+		 SELECT mb.account_id, $1, 4096, 'Older than it looks',
+		        '{"from":["Alice Example <alice@example.com>"],"to":["bob@example.com"]}'::jsonb,
+		        NULL, '2021-05-13 15:54:00+00', 'abc123@example.com'
+		 FROM mailboxes mb WHERE mb.id = $2
+		 RETURNING id`, make([]byte, 32), h.mailboxID).Scan(&messageID)
+	if err != nil {
+		t.Fatalf("inserting message: %v", err)
+	}
+	if _, err := h.store.Pool().Exec(ctx,
+		`INSERT INTO mailbox_messages (mailbox_id, message_id, local_uid, upstream_uid, body_state, flags)
+		 VALUES ($1, $2, 1, 1, 'pending', '{}')`, h.mailboxID, messageID); err != nil {
+		t.Fatalf("linking message: %v", err)
+	}
+	if _, err := h.store.Pool().Exec(ctx,
+		`UPDATE mailboxes SET local_uidnext = 2 WHERE id = $1`, h.mailboxID); err != nil {
+		t.Fatalf("updating uidnext: %v", err)
+	}
+
+	client := h.login(t)
+	if _, err := client.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatalf("selecting: %v", err)
+	}
+
+	var set imap.SeqSet
+	set.AddNum(1)
+	messages, err := client.Fetch(set, &imap.FetchOptions{
+		Envelope: true,
+		BodySection: []*imap.FetchItemBodySection{{
+			Specifier:    imap.PartSpecifierHeader,
+			HeaderFields: []string{"From", "To", "Subject", "Date", "Message-ID"},
+		}},
+	}).Collect()
+	if err != nil {
+		t.Fatalf("fetching headers: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("fetched %d messages, want 1", len(messages))
+	}
+
+	var headers string
+	for _, contents := range messages[0].BodySection {
+		headers = string(contents.Bytes)
+	}
+	t.Logf("headers served:\n%s", headers)
+
+	for _, want := range []string{
+		"Date: Thu, 13 May 2021 15:54:00 +0000",
+		"Message-ID: <abc123@example.com>",
+		"Alice Example <alice@example.com>",
+	} {
+		if !strings.Contains(headers, want) {
+			t.Errorf("headers do not contain %q", want)
+		}
+	}
+
+	if envelope := messages[0].Envelope; envelope == nil {
+		t.Error("no envelope returned")
+	} else if envelope.Date.Year() != 2021 {
+		t.Errorf("envelope date is %v, want the 2021 sent date", envelope.Date)
+	}
+}
+
 // A client asking for a few header fields must not receive the whole block.
 func TestHeaderFieldsAreFiltered(t *testing.T) {
 	h := newHarness(t, 3)

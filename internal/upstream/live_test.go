@@ -111,7 +111,10 @@ func liveConnect(t *testing.T) *upstream.Client {
 	account := liveAccount(t)
 	connector := upstream.NewConnector(liveConfig(), logging.Discard())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Generous, because a real provider under load can take a very long time
+	// to answer a login, and a live test that gives up first tells us nothing
+	// about the server it was meant to measure.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	client, err := connector.Connect(ctx, account)

@@ -18,11 +18,18 @@ type MessageSummary struct {
 	Subject     string
 	// From, To and Cc are the correspondents, needed to build the headers a
 	// mail client asks for before a message body has been downloaded.
-	From           []string
-	To             []string
-	Cc             []string
-	Preview        string
-	InternalDate   *time.Time
+	From         []string
+	To           []string
+	Cc           []string
+	Preview      string
+	InternalDate *time.Time
+	// SentDate is the message's own Date header, as reported by the envelope.
+	// It is what a mail client shows, and it can differ from the date the
+	// server filed the message under.
+	SentDate *time.Time
+	// MessageIDHdr is the RFC 5322 Message-ID, without angle brackets. Clients
+	// thread on it, so a header block built from metadata must carry it.
+	MessageIDHdr   string
 	Size           int64
 	Flags          []string
 	BodyState      string
@@ -49,14 +56,15 @@ func (s *Store) ListMessages(ctx context.Context, mailboxID int64, limit, offset
 		`SELECT mm.id, m.id, mm.local_uid, COALESCE(mm.upstream_uid, 0),
 		        COALESCE(m.subject, '(no subject)'),
 		        COALESCE(m.addrs, '{}'::jsonb), COALESCE(m.preview, ''),
-		        m.internal_date, m.rfc822_size, mm.flags, mm.body_state,
+		        m.internal_date, m.sent_date, COALESCE(m.message_id_hdr, ''),
+		        m.rfc822_size, mm.flags, mm.body_state,
 		        EXISTS (SELECT 1 FROM mime_parts p
 		                WHERE p.message_id = m.id AND p.filename IS NOT NULL),
 		        count(*) OVER () AS total
 		 FROM mailbox_messages mm
 		 JOIN messages m ON m.id = mm.message_id
 		 WHERE mm.mailbox_id = $1 AND mm.expunged_at IS NULL
-		 ORDER BY m.internal_date DESC NULLS LAST, mm.local_uid DESC
+		 ORDER BY COALESCE(m.internal_date, m.sent_date) DESC NULLS LAST, mm.local_uid DESC
 		 LIMIT $2 OFFSET $3`, mailboxID, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing messages: %w", err)
@@ -73,7 +81,8 @@ func (s *Store) ListMessages(ctx context.Context, mailboxID int64, limit, offset
 			addrsJSON []byte
 		)
 		if err := rows.Scan(&m.MailboxMessageID, &m.MessageID, &m.LocalUID, &m.UpstreamUID,
-			&m.Subject, &addrsJSON, &m.Preview, &m.InternalDate, &m.Size, &m.Flags,
+			&m.Subject, &addrsJSON, &m.Preview, &m.InternalDate, &m.SentDate,
+			&m.MessageIDHdr, &m.Size, &m.Flags,
 			&m.BodyState, &m.HasAttachments, &total); err != nil {
 			return nil, 0, fmt.Errorf("scanning message: %w", err)
 		}
@@ -216,7 +225,8 @@ func (s *Store) ListMessagesByUID(ctx context.Context, mailboxID int64, limit, o
 	query := `SELECT mm.id, m.id, mm.local_uid, COALESCE(mm.upstream_uid, 0),
 	                 COALESCE(m.subject, ''),
 	                 COALESCE(m.addrs, '{}'::jsonb), COALESCE(m.preview, ''),
-	                 m.internal_date, m.rfc822_size, mm.flags, mm.body_state,
+	                 m.internal_date, m.sent_date, COALESCE(m.message_id_hdr, ''),
+	                 m.rfc822_size, mm.flags, mm.body_state,
 	                 EXISTS (SELECT 1 FROM mime_parts p
 	                         WHERE p.message_id = m.id AND p.filename IS NOT NULL),
 	                 count(*) OVER () AS total
@@ -246,7 +256,8 @@ func (s *Store) ListMessagesByUID(ctx context.Context, mailboxID int64, limit, o
 			addrsJSON []byte
 		)
 		if err := rows.Scan(&m.MailboxMessageID, &m.MessageID, &m.LocalUID, &m.UpstreamUID,
-			&m.Subject, &addrsJSON, &m.Preview, &m.InternalDate, &m.Size, &m.Flags,
+			&m.Subject, &addrsJSON, &m.Preview, &m.InternalDate, &m.SentDate,
+			&m.MessageIDHdr, &m.Size, &m.Flags,
 			&m.BodyState, &m.HasAttachments, &total); err != nil {
 			return nil, 0, fmt.Errorf("scanning message: %w", err)
 		}

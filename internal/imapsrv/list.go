@@ -155,10 +155,7 @@ func statusFor(box store.Mailbox, options *imap.StatusOptions) *imap.StatusData 
 // what the client would compute itself; the summary provides a fallback for a
 // message whose body has not been downloaded.
 func envelopeFor(summary store.MessageSummary, raw []byte) *imap.Envelope {
-	envelope := &imap.Envelope{Subject: summary.Subject}
-	if summary.InternalDate != nil {
-		envelope.Date = *summary.InternalDate
-	}
+	envelope := &imap.Envelope{Subject: summary.Subject, Date: headerDate(summary)}
 
 	if len(raw) > 0 {
 		parsed := mailstore.Parse(raw)
@@ -181,7 +178,14 @@ func envelopeFor(summary store.MessageSummary, raw []byte) *imap.Envelope {
 		return envelope
 	}
 
+	// Nothing has been downloaded yet, so the envelope is built entirely from
+	// what the metadata pass recorded.
 	envelope.From = toAddresses(summary.From)
+	envelope.To = toAddresses(summary.To)
+	envelope.Cc = toAddresses(summary.Cc)
+	if summary.MessageIDHdr != "" {
+		envelope.MessageID = angled(summary.MessageIDHdr)
+	}
 	return envelope
 }
 
