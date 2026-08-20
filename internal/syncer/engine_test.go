@@ -639,15 +639,19 @@ func TestMetadataFetchDoesNotRequestBodyStructure(t *testing.T) {
 // is hours of an empty interface while the sync is in fact working, so the
 // property worth protecting is that the two overlap.
 func TestBodiesDownloadWhileMetadataIsStillRunning(t *testing.T) {
-	const messages = 300
+	const messages = 800
 
-	// Throttled so the metadata pass takes long enough for downloading to
-	// overlap it at all. Over loopback it would otherwise finish before a
-	// single body could be fetched.
+	// Enumeration is made slow by round trips rather than by bytes: eighty
+	// small chunks take real time on any machine, whereas throttling alone made
+	// the response small enough to arrive before a body worker had finished
+	// connecting — which passed here and failed on CI.
 	h := newHarness(t, fakeimap.Options{
 		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(messages)}},
-		Chaos:     fakeimap.Chaos{SlowBytes: 200_000},
-	}, func(c *config.Config) { c.Sync.MetadataBatchMessages = 25 })
+		Chaos:     fakeimap.Chaos{SlowBytes: 400_000},
+	}, func(c *config.Config) {
+		c.Sync.MetadataBatchMessages = 10
+		c.Sync.BodyBatchMaxMsgs = 5
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
