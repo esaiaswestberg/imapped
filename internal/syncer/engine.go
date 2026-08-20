@@ -271,7 +271,12 @@ func (e *Engine) syncAccountLocked(ctx context.Context, accountID int64, p *Prog
 			// otherwise loses every mailbox after the first fault.
 			replacement, connErr := e.reconnect(ctx, account, client)
 			if connErr != nil {
-				return result, fmt.Errorf("reconnecting after %s failed: %w", box.Name, connErr)
+				// Report what actually went wrong with the mailbox, not merely
+				// that the recovery attempt also failed. A note reading
+				// "reconnecting after INBOX failed: dial tcp ..." says nothing
+				// about why INBOX failed, which is the thing worth knowing.
+				return result, fmt.Errorf("%s failed (%w), and reconnecting to continue failed: %w",
+					box.Name, err, connErr)
 			}
 			client = replacement
 
@@ -313,7 +318,33 @@ func (e *Engine) reconnect(ctx context.Context, account store.Account, old *upst
 	if err != nil {
 		return nil, err
 	}
-	return e.connect.Connect(ctx, creds)
+
+	// Retried, because a single attempt is not a recovery strategy.
+	//
+	// A momentary DNS failure during reconnection was cancelling runs that had
+	// already enumerated forty thousand messages. Transient faults are exactly
+	// what reconnecting is for; giving up on the first one throws away all the
+	// work the run had done. Authentication failures are not retried, so a bad
+	// password still stops immediately rather than hammering the provider.
+	var replacement *upstream.Client
+	err = upstream.Retry(ctx,
+		e.cfg.Upstream.RetryMaxAttempts,
+		e.cfg.Upstream.RetryBaseDelay.Std(),
+		e.cfg.Upstream.RetryMaxDelay.Std(),
+		func(attemptCtx context.Context) error {
+			client, err := e.connect.Connect(attemptCtx, creds)
+			if err != nil {
+				e.log.Warn("reconnecting to the upstream server failed, will retry",
+					"account_id", account.ID, "error", err)
+				return err
+			}
+			replacement = client
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	return replacement, nil
 }
 
 func (e *Engine) credentials(account store.Account) (upstream.Account, error) {

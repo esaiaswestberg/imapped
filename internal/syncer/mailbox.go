@@ -400,7 +400,7 @@ func (e *Engine) bodyPass(
 	p *Progress,
 	metadataDone <-chan struct{},
 ) (int64, int64, error) {
-	if pending, err := e.store.CountPendingBodies(ctx, mailbox.ID); err == nil {
+	if pending, err := e.store.CountPendingBodiesForAccount(ctx, account.ID); err == nil {
 		p.setPendingBodies(pending)
 	}
 
@@ -425,7 +425,29 @@ func (e *Engine) bodyPass(
 	batches := make(chan []SizedUID)
 	var fetched, bytes atomic.Int64
 
-	group, groupCtx := errgroup.WithContext(ctx)
+	// A plain group, not errgroup.WithContext.
+	//
+	// With a shared cancelling context, one worker hitting a deadline cancelled
+	// every sibling and ended the download for the whole mailbox — turning a
+	// single slow batch into a total stop. Bodies are claimed from the database
+	// and retried on the next run, so one failed worker is not a reason to
+	// abandon the rest; the pass fails only if every worker did.
+	group := new(errgroup.Group)
+	groupCtx := ctx
+
+	var (
+		workerMu   sync.Mutex
+		workerErrs []error
+		workersRun int
+	)
+	recordWorker := func(err error) {
+		workerMu.Lock()
+		defer workerMu.Unlock()
+		workersRun++
+		if err != nil {
+			workerErrs = append(workerErrs, err)
+		}
+	}
 
 	// Producer: claim work and plan it into batches.
 	//
@@ -463,7 +485,7 @@ func (e *Engine) bodyPass(
 				}
 				continue
 			}
-			if remaining, err := e.store.CountPendingBodies(groupCtx, mailbox.ID); err == nil {
+			if remaining, err := e.store.CountPendingBodiesForAccount(groupCtx, account.ID); err == nil {
 				p.setPendingBodies(remaining)
 			}
 
@@ -501,28 +523,63 @@ func (e *Engine) bodyPass(
 					e.log.Warn("upstream refused another connection; this worker will not run. "+
 						"Lower sync.connections_per_account if downloads stall",
 						"account_id", account.ID, "worker", worker, "error", err)
+					recordWorker(nil)
 					return nil
 				}
 				e.log.Warn("a body-fetch worker could not connect",
 					"account_id", account.ID, "worker", worker, "error", err)
-				return err
+				recordWorker(err)
+				return nil
 			}
 			defer workerClient.Close()
 
 			if _, err := workerClient.Select(groupCtx, mailbox.Name, true); err != nil {
-				return err
+				e.log.Warn("a body-fetch worker could not open the mailbox",
+					"mailbox", mailbox.Name, "worker", worker, "error", err)
+				recordWorker(err)
+				return nil
 			}
 
+			// Batches keep being drained even after a failure, so one bad batch
+			// does not strand the queue behind a worker that has stopped
+			// reading from it.
+			var workerErr error
 			for batch := range batches {
 				if err := e.fetchBatch(groupCtx, workerClient, mailbox, batch, p, &fetched, &bytes); err != nil {
-					return err
+					e.log.Warn("a batch of message bodies failed; the messages stay queued for the next run",
+						"mailbox", mailbox.Name, "worker", worker, "size", len(batch), "error", err)
+					workerErr = err
+					break
 				}
 			}
+			// Drain whatever is left so the producer is never blocked writing
+			// to a channel nobody is reading.
+			for range batches { //nolint:revive // deliberately discarding
+			}
+			recordWorker(workerErr)
 			return nil
 		})
 	}
 
 	err := group.Wait()
+
+	// Only a total failure is worth failing the mailbox for. Anything less
+	// leaves messages queued, and the next run picks them up.
+	workerMu.Lock()
+	failed, ran := len(workerErrs), workersRun
+	var firstErr error
+	if failed > 0 {
+		firstErr = workerErrs[0]
+	}
+	workerMu.Unlock()
+
+	if err == nil && failed > 0 && failed == ran {
+		err = fmt.Errorf("every body-fetch worker failed (%d of %d): %w", failed, ran, firstErr)
+	} else if failed > 0 {
+		e.log.Warn("some body-fetch workers failed; their messages remain queued",
+			"mailbox", mailbox.Name, "failed", failed, "workers", ran)
+	}
+
 	return fetched.Load(), bytes.Load(), err
 }
 

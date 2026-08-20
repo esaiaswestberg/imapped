@@ -215,7 +215,7 @@ func Default() Config {
 			IOIdleTimeout:        Duration(60 * time.Second),
 			CommandTimeout:       Duration(30 * time.Second),
 			FetchMetadataTimeout: Duration(10 * time.Minute),
-			FetchBodyTimeout:     Duration(60 * time.Second),
+			FetchBodyTimeout:     Duration(10 * time.Minute),
 			TCPUserTimeout:       Duration(60 * time.Second),
 			TCPKeepAlive:         Duration(30 * time.Second),
 

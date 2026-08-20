@@ -489,3 +489,20 @@ func (s *Store) MessageIDForMailboxMessage(ctx context.Context, mailboxMessageID
 	}
 	return id, nil
 }
+
+// CountPendingBodiesForAccount reports how many messages across every mailbox
+// still need their body downloaded.
+//
+// The interface shows this rather than the figure for the mailbox currently
+// being worked on: a per-mailbox count reads as though the whole account is
+// nearly finished while a much larger backlog sits in another folder.
+func (s *Store) CountPendingBodiesForAccount(ctx context.Context, accountID int64) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*)
+		 FROM mailbox_messages mm
+		 JOIN mailboxes mb ON mb.id = mm.mailbox_id
+		 WHERE mb.account_id = $1 AND mm.body_state IN ('pending', 'fetching')`,
+		accountID).Scan(&n)
+	return n, err
+}

@@ -108,7 +108,12 @@ command_timeout = "30s"
 # transfers later. Stalls are caught by io_idle_timeout, which is the tighter
 # and more meaningful guard.
 fetch_metadata_timeout = "10m"
-fetch_body_timeout = "60s"
+
+# Ceiling on one batch of message bodies. Generous for the same reason: a batch
+# is already bounded by body_batch_bytes, so this is not an unbounded transfer,
+# and a throttled server can legitimately take minutes to deliver it. A 60s
+# ceiling here caused batches to be abandoned mid-download on a busy server.
+fetch_body_timeout = "10m"
 
 # Kernel-level detection of a black-holed connection. Linux's default is around
 # 11 minutes, which is far too slow to notice a dead peer.

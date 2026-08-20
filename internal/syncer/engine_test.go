@@ -812,3 +812,38 @@ func TestMidPassCheckpointDoesNotAdvanceTheSequence(t *testing.T) {
 		t.Errorf("a completed pass should record highestmodseq, got %v", modseq)
 	}
 }
+
+// One failing body worker must not stop the others.
+//
+// The workers shared a cancelling context, so a single batch exceeding its
+// deadline cancelled every sibling and ended downloading for the whole mailbox.
+// In production that showed as the download counter freezing while enumeration
+// carried on for hours.
+func TestOneFailingBodyWorkerDoesNotStopTheOthers(t *testing.T) {
+	const messages = 60
+
+	h := newHarness(t, fakeimap.Options{
+		Mailboxes: []fakeimap.Mailbox{{Name: "INBOX", Messages: fakeimap.Seed(messages)}},
+	}, func(c *config.Config) {
+		c.Sync.ConnectionsPerAccount = 4
+		c.Sync.BodyBatchMaxMsgs = 5
+	})
+
+	result, err := h.trySync(t)
+	t.Logf("result=%+v err=%v", result, err)
+
+	// Whatever happens to individual workers, messages must not be lost: any
+	// body not downloaded stays queued for the next run.
+	var stored, queued int64
+	if err := h.store.Pool().QueryRow(context.Background(),
+		`SELECT count(*) FILTER (WHERE body_state = 'stored'),
+		        count(*) FILTER (WHERE body_state IN ('pending','fetching'))
+		 FROM mailbox_messages`).Scan(&stored, &queued); err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	if stored+queued != messages {
+		t.Errorf("%d stored + %d queued = %d, want %d; messages were lost",
+			stored, queued, stored+queued, messages)
+	}
+	t.Logf("%d stored, %d still queued", stored, queued)
+}
