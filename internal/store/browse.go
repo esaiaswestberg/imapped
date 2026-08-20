@@ -207,17 +207,6 @@ func (s *Store) StatsForAccount(ctx context.Context, accountID int64) (AccountSt
 	return st, nil
 }
 
-func decodeStrings(raw []byte) []string {
-	if len(raw) == 0 {
-		return nil
-	}
-	var out []string
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil
-	}
-	return out
-}
-
 // ListMessagesByUID returns messages ordered by local UID ascending.
 //
 // This is the order IMAP sequence numbers follow: sequence number N is the Nth
